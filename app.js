@@ -167,7 +167,7 @@ function makeFSK(M) {
 function makeASK() {
   const CARRIER = 2000, AMP_LO = 0.16, AMP_HI = 0.36, THRESH_DB = 19;
   return {
-    name: 'OOK/ASK', bits: 1,
+    name: 'OOK/ASK', bits: 1, iq: 'amp', // amplitude → constellation on the I axis
     guides: () => [CARRIER],
     txData: (osc, gain, sym, idx, t) =>
       scheduleTone(osc, gain, CARRIER, t, sym ? AMP_HI : AMP_LO),
@@ -175,7 +175,13 @@ function makeASK() {
       const snrs = frames.filter((fr) => Math.abs(fr.freq - CARRIER) <= TOLERANCE)
         .map((fr) => fr.snr).sort((a, b) => a - b);
       if (!snrs.length) return null;
-      return snrs[Math.floor(snrs.length / 2)] >= THRESH_DB ? 1 : 0; // fragile by design
+      const median = snrs[Math.floor(snrs.length / 2)];
+      // Plot the symbol's strength along +I (radius = amplitude), with a little
+      // spread so overlapping symbols read as a cloud. As the link weakens both
+      // clusters slide toward the origin and merge — the visual "why ASK is fragile".
+      const r = Math.max(0, Math.min(1, median / 40));
+      pushConstellation(r, (Math.random() - 0.5) * 0.08);
+      return median >= THRESH_DB ? 1 : 0; // fragile by design
     },
   };
 }
@@ -213,7 +219,7 @@ function makeChirp() {
 function makeDBPSK() {
   const CAR = 2000;
   return {
-    name: 'DBPSK', bits: 1, experimental: true,
+    name: 'DBPSK', bits: 1, experimental: true, iq: 'phase', // phase → ±I constellation
     guides: () => [CAR],
     reset: () => { dbpskPrev = null; constPoints = []; },
     // Render the whole message to a sample buffer with a phase-continuous
@@ -483,8 +489,15 @@ function drawConstellation() {
   g.beginPath(); g.moveTo(0, cy); g.lineTo(W, cy); g.moveTo(cx, 0); g.lineTo(cx, H); g.stroke();
   g.beginPath(); g.arc(cx, cy, R, 0, 2 * Math.PI); g.stroke();
   g.fillStyle = 'rgba(200,210,255,0.6)'; g.font = '11px system-ui,sans-serif';
-  g.fillText('bit 0', cx + R - 30, cy - 6);
-  g.fillText('bit 1', cx - R + 4, cy - 6);
+  if (mod && mod.iq === 'amp') {
+    // ASK: amplitude along +I — weak (0) near the origin, strong (1) toward the edge.
+    g.fillText('0 (weak)', cx + 10, cy - 6);
+    g.fillText('1 (strong)', cx + R - 56, cy - 6);
+  } else {
+    // DBPSK: phase — same phase (bit 0) at +I, flipped (bit 1) at −I.
+    g.fillText('bit 0', cx + R - 30, cy - 6);
+    g.fillText('bit 1', cx - R + 4, cy - 6);
+  }
   for (let i = 0; i < constPoints.length; i++) {
     const p = constPoints[i], age = i / constPoints.length;
     g.fillStyle = 'rgba(90,209,255,' + (0.25 + 0.75 * age) + ')';
@@ -683,6 +696,16 @@ function showView(name) {
   }
 }
 
+/* ---- Mute state -> status line ------------------------------------------- */
+// Both mutes share the one status line, so it must reflect the COMBINED state —
+// otherwise releasing one toggle wrongly resets the line while the other is active.
+function muteStatus() {
+  if (micMuted && muted) return 'mic muted · transmit off';
+  if (micMuted) return 'mic muted — not listening or recording';
+  if (muted) return 'transmit muted — this phone won’t emit sound';
+  return 'listening · ' + mod.name;
+}
+
 /* ---- Receive-only mute (app-level TX kill switch) ------------------------- */
 // There is no OS/browser "speaker permission", so this is how a phone guarantees it
 // stays receive-only: block every transmit path and grey out the controls.
@@ -696,7 +719,7 @@ function setMuted(m) {
   ['send', 'tonePlay', 'toneMark', 'toneSpace', 'toneSweep'].forEach((id) => {
     const el = $(id); if (el) el.disabled = m;
   });
-  setStatus(m ? 'transmit muted — this phone won’t emit sound' : 'listening · ' + mod.name);
+  setStatus(muteStatus());
 }
 
 /* ---- Receive-only mute (mic kill switch) --------------------------------- */
@@ -707,7 +730,7 @@ function setMicMutedUI(m) {
   b.classList.toggle('muted', m);
   b.setAttribute('aria-pressed', String(m));
   b.textContent = m ? '🚫 Mic: muted' : '🎙️ Mic: on';
-  setStatus(m ? 'mic muted — not listening or recording' : 'listening · ' + mod.name);
+  setStatus(muteStatus());
 }
 
 /* ---- Wire up the UI ------------------------------------------------------- */
@@ -740,6 +763,7 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   sel.addEventListener('change', () => {
     mod = MODS[+sel.value];
+    constPoints = []; dbpskPrev = null; // don't mix one scheme's dots into another's
     if (ctx) { drawGuides(); setStatus('modulation: ' + mod.name); }
   });
 

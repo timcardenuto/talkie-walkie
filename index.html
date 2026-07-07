@@ -182,14 +182,19 @@
       </div>
     </section>
 
-    <!-- Constellation (I/Q) view, meaningful when DBPSK is selected -->
+    <!-- Constellation (I/Q) view, meaningful for the phase/amplitude schemes -->
     <section id="view-constellation" style="display:none">
       <div class="card">
         <h2>Constellation (I/Q)</h2>
-        <p class="hint">Select <b>DBPSK</b> in Messenger and send a message. Each symbol's
-           phase change plots here: a point near <b>bit 0</b> (right) means "same phase as
-           last symbol", near <b>bit 1</b> (left) means "flipped". Tight clusters = clean
-           link; a smeared ring = the room scrambling the phase. Best solo/loopback.</p>
+        <p class="hint">Select <b>DBPSK</b> or <b>OOK/ASK</b> in Messenger and send a message
+           (works best solo/loopback). <b>DBPSK</b> plots each symbol's <i>phase</i>: near
+           <b>bit 0</b> (right) = same phase as last symbol, <b>bit 1</b> (left) = flipped —
+           tight clusters mean a clean link, a smeared ring means the room is scrambling the
+           phase. <b>OOK/ASK</b> plots <i>amplitude</i> along the right axis: <b>0 (weak)</b>
+           near the centre, <b>1 (strong)</b> further out — as the phones move apart both
+           clusters slide toward the origin and merge, which is exactly why ASK is fragile.
+           The frequency schemes (FSK/FHSS/Chirp) don't map to a constellation — watch those
+           on the Spectrum &amp; waterfall instead.</p>
         <div class="wfwrap">
           <canvas id="constellation" width="600" height="300"></canvas>
         </div>
