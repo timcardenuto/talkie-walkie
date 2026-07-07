@@ -429,37 +429,8 @@ function loop() {
   drawSpectrum();   // refreshes byteData + draws the instantaneous bars
   drawWaterfall();  // reuses byteData for its new row
   if (!micMuted) decodeStep(); // mic released → nothing to decode (updates signalSNR)
-  drawSnrMeter();   // live in-band SNR vs the threshold
   drawConstellation();
   requestAnimationFrame(loop);
-}
-
-/* ---- SNR meter: live in-band SNR next to the FFT, with the threshold line ---
- * signalSNR (set by decodeStep) is the loudest in-band peak above the noise floor.
- * The red line marks SNR_DB — a burst only registers when the bar clears it. */
-function drawSnrMeter() {
-  const cv = $('snrMeter'); if (!cv) return;
-  const g = cv.getContext('2d');
-  const W = cv.width, H = cv.height, MAXDB = 30, top = 13, bot = H - 13;
-  const yOf = (db) => bot - Math.max(0, Math.min(MAXDB, db)) / MAXDB * (bot - top);
-
-  g.fillStyle = '#0b1020'; g.fillRect(0, 0, W, H);
-
-  const snr = isFinite(signalSNR) ? signalSNR : 0;
-  const above = snr >= SNR_DB;
-  const barW = W * 0.5, bx = (W - barW) / 2, yb = yOf(snr);
-  g.fillStyle = above ? '#5affa0' : '#5ad1ff';
-  g.fillRect(bx, yb, barW, bot - yb);
-
-  const yt = yOf(SNR_DB);                     // threshold line (moves with the slider)
-  g.strokeStyle = '#ff8f8f'; g.lineWidth = 2;
-  g.beginPath(); g.moveTo(2, yt); g.lineTo(W - 2, yt); g.stroke();
-
-  g.textAlign = 'center'; g.font = '10px system-ui,sans-serif';
-  g.fillStyle = 'rgba(200,210,255,0.7)'; g.fillText('SNR', W / 2, 10);
-  g.fillStyle = '#ff8f8f'; g.fillText('▸' + SNR_DB, W / 2, Math.min(Math.max(yt - 4, 22), bot - 2));
-  g.fillStyle = above ? '#5affa0' : '#8b96c4';
-  g.fillText(Math.round(Math.max(0, snr)) + '', W / 2, H - 3);
 }
 
 /* ---- Spectrum: FFT bars or averaged PSD trace ----------------------------- */
@@ -474,6 +445,39 @@ function drawSpectrum() {
 
   if (specMode === 'psd') drawPsd(g, W, H, maxBin);
   else drawFftBars(g, W, H, maxBin);
+
+  drawThreshold(g, W, H); // detection line floating above the live noise floor
+}
+
+// The detection rule is "peak must beat the in-band average by SNR_DB", which is a
+// *relative* test — so on an absolute-level plot the threshold is a line SNR_DB above
+// the current noise floor. The vertical gap between the two dashed lines literally IS
+// the SNR requirement; a peak that pokes above the red line is what registers.
+function drawThreshold(g, W, H) {
+  const FLOOR = analyser.minDecibels, CEIL = analyser.maxDecibels;
+  const yOf = (db) => H * (1 - (Math.max(FLOOR, Math.min(CEIL, db)) - FLOOR) / (CEIL - FLOOR));
+
+  // In-band noise floor = mean level across the detection band (byteData is a linear
+  // map of FLOOR..CEIL dB, so averaging the bytes ≈ the mean dB the detector uses).
+  let sum = 0, n = 0;
+  for (let b = bandLoBin; b <= bandHiBin && b < byteData.length; b++) { sum += byteData[b]; n++; }
+  const noiseDb = FLOOR + (n ? sum / n : 0) / 255 * (CEIL - FLOOR);
+  const yN = yOf(noiseDb), yT = yOf(noiseDb + SNR_DB);
+
+  g.save();
+  g.setLineDash([4, 4]); g.lineWidth = 1;
+  g.strokeStyle = 'rgba(139,150,196,0.6)';                 // noise floor
+  g.beginPath(); g.moveTo(0, yN); g.lineTo(W, yN); g.stroke();
+  g.strokeStyle = '#ff8f8f'; g.lineWidth = 1.5;            // detection threshold
+  g.beginPath(); g.moveTo(0, yT); g.lineTo(W, yT); g.stroke();
+  g.setLineDash([]);
+
+  g.font = '10px system-ui,sans-serif'; g.textAlign = 'right';
+  g.fillStyle = '#ff8f8f';
+  g.fillText('detect ▸ noise + ' + SNR_DB + ' dB', W - 4, Math.max(yT - 3, 10));
+  g.fillStyle = 'rgba(139,150,196,0.85)';
+  g.fillText('noise floor', W - 4, Math.min(yN + 12, H - 3));
+  g.restore();
 }
 
 // Raw, instantaneous magnitude — jumpy but responsive.
@@ -829,6 +833,16 @@ function setSpecMode(m) {
   $('specPsd').classList.toggle('active', m === 'psd');
 }
 
+// Inline SVG icons (Feather-style) so BOTH toggles visibly change glyph on/off —
+// emoji has no reliable "muted mic". stroke=currentColor means they follow the
+// button colour, turning red with the `.muted` class.
+const ICON = {
+  mic: '<svg class="ic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>',
+  micOff: '<svg class="ic" viewBox="0 0 24 24"><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 9v2a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 11v-1m14 0v1a7 7 0 0 1-.11 1.23"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>',
+  spk: '<svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>',
+  spkOff: '<svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>',
+};
+
 /* ---- Receive-only mute (app-level TX kill switch) ------------------------- */
 // There is no OS/browser "speaker permission", so this is how a phone guarantees it
 // stays receive-only: block every transmit path and grey out the controls.
@@ -838,7 +852,7 @@ function setMuted(m) {
   const b = $('muteBtn');
   b.classList.toggle('muted', m);
   b.setAttribute('aria-pressed', String(m));
-  b.textContent = m ? '🔇 Transmit: off' : '🔊 Transmit: on';
+  b.innerHTML = (m ? ICON.spkOff : ICON.spk) + (m ? 'Transmit: off' : 'Transmit: on');
   ['send', 'tonePlay', 'toneMark', 'toneSpace', 'toneEnd', 'toneSweep'].forEach((id) => {
     const el = $(id); if (el) el.disabled = m;
   });
@@ -852,9 +866,7 @@ function setMicMutedUI(m) {
   const b = $('micMuteBtn');
   b.classList.toggle('muted', m);
   b.setAttribute('aria-pressed', String(m));
-  // Keep the mic glyph in both states (there's no reliable "muted mic" emoji); the
-  // red styling + "muted" conveys off. 🚫 alone just showed a bare prohibition sign.
-  b.textContent = m ? '🎙️ Mic: muted' : '🎙️ Mic: on';
+  b.innerHTML = (m ? ICON.micOff : ICON.mic) + (m ? 'Mic: muted' : 'Mic: on');
   setStatus(muteStatus());
 }
 

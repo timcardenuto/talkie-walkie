@@ -27,7 +27,9 @@
     nav button.active { color:var(--ink); border-color:var(--accent2);
                         box-shadow:0 0 0 1px var(--accent2) inset; }
     #controls { display:flex; gap:8px; margin-top:8px; }
-    #controls button { flex:1; }
+    #controls button { flex:1; display:inline-flex; align-items:center; justify-content:center; }
+    .ic { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:2;
+          stroke-linecap:round; stroke-linejoin:round; margin-right:6px; flex:0 0 auto; }
     .ghost.muted { color:#ff8f8f; border-color:#ff8f8f; box-shadow:0 0 0 1px #ff8f8f inset; }
     button:disabled { opacity:.45; }
     /* Fixed + above the enable overlay (z-index 10) so you can read the version
@@ -46,9 +48,6 @@
                    color:var(--muted); border-radius:8px; font-size:12px; }
     .seg .segbtn.active { color:var(--ink); border-color:var(--accent2);
                           box-shadow:0 0 0 1px var(--accent2) inset; }
-    .specrow { display:flex; gap:8px; align-items:stretch; }
-    .specrow #spectrum { flex:1 1 auto; width:auto; min-width:0; }
-    .specrow #snrMeter { flex:0 0 54px; width:54px; }
     .readout { font-variant-numeric:tabular-nums; font-size:20px; margin-top:10px; }
     .readout span { color:var(--accent); }
     button.primary { background:var(--accent2); color:#fff; border:none; border-radius:10px;
@@ -105,8 +104,9 @@
          "speaker permission", and the mic mute goes further than the OS by releasing
          the device): TX = stop our own sounds, Mic = stop capturing any sound. -->
     <div id="controls" hidden>
-      <button id="muteBtn" class="ghost" aria-pressed="false">🔊 Transmit: on</button>
-      <button id="micMuteBtn" class="ghost" aria-pressed="false">🎙️ Mic: on</button>
+      <!-- Icons are set from JS (ICON in app.js) when audio is enabled. -->
+      <button id="muteBtn" class="ghost" aria-pressed="false">Transmit: on</button>
+      <button id="micMuteBtn" class="ghost" aria-pressed="false">Mic: on</button>
     </div>
   </header>
 
@@ -129,12 +129,9 @@
           <button id="specFft" class="segbtn active">FFT · magnitude</button>
           <button id="specPsd" class="segbtn">PSD · averaged</button>
         </div>
-        <div class="specrow">
-          <canvas id="spectrum" width="600" height="160"></canvas>
-          <!-- Live in-band SNR with the detection threshold line, so you can see
-               where the threshold sits relative to the actual signal/noise. -->
-          <canvas id="snrMeter" width="60" height="160"></canvas>
-        </div>
+        <!-- The detection threshold is drawn right on the spectrum (a line floating
+             SNR dB above the live noise floor); no separate meter needed. -->
+        <canvas id="spectrum" width="600" height="160"></canvas>
         <div class="modrow" style="margin-top:10px">
           <label for="snrRange2">Threshold</label>
           <input id="snrRange2" type="range" min="3" max="25" step="1" value="10" />
