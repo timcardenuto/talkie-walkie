@@ -170,6 +170,13 @@
           <div class="meter"><div id="sigBar"></div></div>
           <span id="sigLabel">quiet</span>
         </div>
+        <div class="modrow">
+          <label for="snrRange">Sensitivity</label>
+          <input id="snrRange" type="range" min="3" max="25" step="1" value="10" />
+          <span id="snrLabel" class="linklabel" style="width:70px;text-align:right">SNR ≥ 10 dB</span>
+        </div>
+        <p class="hint" style="margin:-4px 0 12px">Lower = more sensitive (catches faint
+           signals, but noise may false-trigger “receiving…”). Higher = stricter.</p>
         <div class="row">
           <input id="message" type="text" placeholder="hello over sound" maxlength="64" />
           <button id="send" class="primary">Send ▶</button>

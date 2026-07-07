@@ -30,7 +30,8 @@ const DATA_HI = 3300;    // high edge of the data-tone band
 const BAND_LO = 1350;    // detection band (includes both markers)
 const BAND_HI = 3650;
 const TOLERANCE = 45;    // Hz — how close a peak must be to count as a given tone
-const SNR_DB    = 10;    // a burst must beat the in-band average by this to count
+let SNR_DB      = 10;    // a burst must beat the in-band average by this to count
+                         // (adjustable live via the Sensitivity slider)
 const ABS_FLOOR = -80;   // ...and be at least this loud (dBFS-ish)
 
 const MIN_TONE_MS   = 45;   // ignore tone blips shorter than this
@@ -349,7 +350,7 @@ async function enable() {
 
     $('enable').style.display = 'none';
     $('controls').hidden = false;
-    setStatus('listening · ' + mod.name + ' · ' + ctx.sampleRate + ' Hz');
+    setStatus(listeningStatus());
     drawGuides();
     running = true;
     requestAnimationFrame(loop);
@@ -531,7 +532,7 @@ function decodeStep() {
   if (rxActive && (now - lastRxSymbolT) > RX_TIMEOUT_MS) {
     rxActive = false; setRxLive('');
     logMessage('◀ ✗ incomplete', '(signal lost mid-message)', 'corrupt');
-    setStatus('listening · ' + mod.name);
+    setStatus(listeningStatus());
   }
 
   const present = peak && peak.peakDb >= ABS_FLOOR && peak.snr >= SNR_DB;
@@ -593,7 +594,7 @@ function finishMessage() {
     const ok = chk === calc;
     logMessage(ok ? '◀ ✓ verified' : '◀ ✗ corrupt', decodeUtf8(bytes), ok ? 'verified' : 'corrupt');
   }
-  setStatus('listening · ' + mod.name);
+  setStatus(listeningStatus());
 }
 
 function decodeUtf8(bytes) {
@@ -633,7 +634,7 @@ function transmit(text) {
   }
   logMessage('▶ sent (' + mod.name + ')', text);
   setStatus('transmitting ~' + (totalMs / 1000).toFixed(1) + ' s (' + mod.name + ')…');
-  setTimeout(() => { if (running) setStatus('listening · ' + mod.name); }, totalMs + 250);
+  setTimeout(() => { if (running) setStatus(listeningStatus()); }, totalMs + 250);
 }
 
 /* ---- Feedback: link meter + live receive preview -------------------------- */
@@ -703,7 +704,13 @@ function muteStatus() {
   if (micMuted && muted) return 'mic muted · transmit off';
   if (micMuted) return 'mic muted — not listening or recording';
   if (muted) return 'transmit muted — this phone won’t emit sound';
-  return 'listening · ' + mod.name;
+  return listeningStatus();
+}
+
+// The idle line, shown consistently everywhere (previously the sample-rate suffix
+// only appeared on the first enable, then vanished after the first message).
+function listeningStatus() {
+  return 'listening · ' + mod.name + (ctx ? ' · ' + ctx.sampleRate + ' Hz' : '');
 }
 
 /* ---- Receive-only mute (app-level TX kill switch) ------------------------- */
@@ -729,7 +736,9 @@ function setMicMutedUI(m) {
   const b = $('micMuteBtn');
   b.classList.toggle('muted', m);
   b.setAttribute('aria-pressed', String(m));
-  b.textContent = m ? '🚫 Mic: muted' : '🎙️ Mic: on';
+  // Keep the mic glyph in both states (there's no reliable "muted mic" emoji); the
+  // red styling + "muted" conveys off. 🚫 alone just showed a bare prohibition sign.
+  b.textContent = m ? '🎙️ Mic: muted' : '🎙️ Mic: on';
   setStatus(muteStatus());
 }
 
@@ -765,6 +774,12 @@ window.addEventListener('DOMContentLoaded', () => {
     mod = MODS[+sel.value];
     constPoints = []; dbpskPrev = null; // don't mix one scheme's dots into another's
     if (ctx) { drawGuides(); setStatus('modulation: ' + mod.name); }
+  });
+
+  const snrRange = $('snrRange'), snrLabel = $('snrLabel');
+  snrRange.addEventListener('input', () => {
+    SNR_DB = +snrRange.value;
+    snrLabel.textContent = 'SNR ≥ ' + SNR_DB + ' dB';
   });
 
   $('send').addEventListener('click', () => {
