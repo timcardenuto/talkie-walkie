@@ -317,6 +317,9 @@ function symbolsToBits(syms, k) {
 
 /* ---- Audio graph state ---------------------------------------------------- */
 let ctx = null, analyser = null, freqData = null, byteData = null;
+let muted = false; // TX kill switch: when true, every transmit path is blocked (see setMuted)
+let micStream = null, micSrc = null, capNode = null; // the live mic graph (rebuilt on unmute)
+let micMuted = false; // RX kill switch: when true the mic is fully released (see stopMic)
 let bandLoBin = 0, bandHiBin = 0;
 let running = false;
 let wfRow = null;          // reusable 1-pixel-tall ImageData for the waterfall
@@ -336,39 +339,10 @@ async function enable() {
   try {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
-    // Turn OFF the phone's speech "cleanup" — it would eat our tones.
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
-    const src = ctx.createMediaStreamSource(stream);
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 4096;
-    analyser.smoothingTimeConstant = 0.0;
-    analyser.minDecibels = -100;
-    analyser.maxDecibels = -10;
-    src.connect(analyser);
-
-    // Raw-sample capture path (chirp matched filter + PSK phase need the actual
-    // waveform, not just spectra). ScriptProcessor is deprecated but simple and
-    // universal; fine for a learning demo.
-    capBuf = new Float32Array(Math.ceil(ctx.sampleRate * 1.0)); // 1 second ring
-    capPos = 0;
-    const cap = ctx.createScriptProcessor(2048, 1, 1);
-    cap.onaudioprocess = (e) => {
-      const inp = e.inputBuffer.getChannelData(0);
-      for (let i = 0; i < inp.length; i++) {
-        capBuf[capPos] = inp[i]; capPos = (capPos + 1) % capBuf.length; capTotal++;
-      }
-    };
-    const mute = ctx.createGain(); mute.gain.value = 0; // keep the node alive without audible output
-    src.connect(cap); cap.connect(mute); mute.connect(ctx.destination);
-
-    freqData = new Float32Array(analyser.frequencyBinCount);
-    byteData = new Uint8Array(analyser.frequencyBinCount);
-    bandLoBin = freqToBin(BAND_LO);
-    bandHiBin = freqToBin(BAND_HI);
+    await startMic();
 
     $('enable').style.display = 'none';
+    $('controls').hidden = false;
     setStatus('listening · ' + mod.name + ' · ' + ctx.sampleRate + ' Hz');
     drawGuides();
     running = true;
@@ -379,12 +353,61 @@ async function enable() {
   }
 }
 
+/* ---- Microphone acquire / release (the RX side; also the mic-mute engine) ---
+ * Muting the mic actually STOPS the MediaStream tracks, so the phone's "mic in use"
+ * indicator turns off — real reassurance, not just discarded samples. Unmuting
+ * re-acquires (no re-prompt after the first grant) and rebuilds the capture graph. */
+async function startMic() {
+  // Turn OFF the phone's speech "cleanup" — it would eat our tones.
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  micSrc = ctx.createMediaStreamSource(micStream);
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 4096;
+  analyser.smoothingTimeConstant = 0.0;
+  analyser.minDecibels = -100;
+  analyser.maxDecibels = -10;
+  micSrc.connect(analyser);
+
+  // Raw-sample capture path (chirp matched filter + PSK phase need the actual
+  // waveform, not just spectra). ScriptProcessor is deprecated but simple and
+  // universal; fine for a learning demo.
+  if (!capBuf) { capBuf = new Float32Array(Math.ceil(ctx.sampleRate * 1.0)); capPos = 0; } // 1 s ring
+  capNode = ctx.createScriptProcessor(2048, 1, 1);
+  capNode.onaudioprocess = (e) => {
+    const inp = e.inputBuffer.getChannelData(0);
+    for (let i = 0; i < inp.length; i++) {
+      capBuf[capPos] = inp[i]; capPos = (capPos + 1) % capBuf.length; capTotal++;
+    }
+  };
+  const sink = ctx.createGain(); sink.gain.value = 0; // keep the node alive without audible output
+  micSrc.connect(capNode); capNode.connect(sink); sink.connect(ctx.destination);
+
+  freqData = new Float32Array(analyser.frequencyBinCount);
+  byteData = new Uint8Array(analyser.frequencyBinCount);
+  bandLoBin = freqToBin(BAND_LO);
+  bandHiBin = freqToBin(BAND_HI);
+  micMuted = false;
+}
+
+function stopMic() {
+  micMuted = true;
+  if (micSrc) { try { micSrc.disconnect(); } catch (_) {} micSrc = null; }
+  if (capNode) { capNode.onaudioprocess = null; try { capNode.disconnect(); } catch (_) {} capNode = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; } // releases the mic
+  // Drop any half-received message and blank the visuals so it's clearly "off".
+  rxActive = false; setRxLive('');
+  if (byteData) byteData.fill(0);
+  if (freqData) freqData.fill(-100);
+}
+
 /* ---- Per-frame loop ------------------------------------------------------- */
 function loop() {
   if (!running) return;
   drawSpectrum();   // refreshes byteData + draws the instantaneous bars
   drawWaterfall();  // reuses byteData for its new row
-  decodeStep();
+  if (!micMuted) decodeStep(); // mic released → nothing to decode
   drawConstellation();
   requestAnimationFrame(loop);
 }
@@ -409,13 +432,17 @@ function drawSpectrum() {
 function drawWaterfall() {
   const cv = $('waterfall'), g = cv.getContext('2d');
   const W = cv.width, H = cv.height, maxBin = freqToBin(5000);
-  if (!wfRow) wfRow = g.createImageData(W, 1);
+  if (!wfRow || wfRow.width !== W) wfRow = g.createImageData(W, 1);
   const d = wfRow.data;
   for (let x = 0; x < W; x++) {
     const c = heat(byteData[Math.floor((x / W) * maxBin)] / 255);
     const i = x * 4; d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = 255;
   }
-  g.drawImage(cv, 0, 1);        // scroll down one pixel
+  // Scroll down one pixel by copying pixels explicitly. (Drawing the canvas onto
+  // its own context — drawImage(cv,0,1) — is a no-op in some engines, e.g. iOS
+  // Safari, which left the waterfall frozen while the spectrum kept updating.)
+  const prev = g.getImageData(0, 0, W, H - 1);
+  g.putImageData(prev, 0, 1);   // shift existing rows down
   g.putImageData(wfRow, 0, 0);  // new line at the top
 }
 function heat(v) {
@@ -564,6 +591,7 @@ function decodeUtf8(bytes) {
 /* ---- Transmitter ---------------------------------------------------------- */
 function transmit(text) {
   if (!ctx) { setStatus('enable audio first'); return; }
+  if (muted) { setStatus('transmit muted — tap 🔊 Transmit to enable'); return; }
   const payload = new TextEncoder().encode(text);
   const chk = payload.reduce((a, b) => (a + b) & 0xff, 0);
   const bytes = [...payload, chk];
@@ -613,6 +641,7 @@ function setRxLive(text) {
 /* ---- Tone playground ------------------------------------------------------ */
 let toneOsc = null;
 function startTone(f) {
+  if (muted) { setStatus('transmit muted'); return; }
   stopTone();
   toneOsc = ctx.createOscillator();
   const g = ctx.createGain(); g.gain.value = 0.2;
@@ -622,6 +651,7 @@ function startTone(f) {
 function stopTone() { if (toneOsc) { try { toneOsc.stop(); } catch (_) {} toneOsc = null; } }
 function sweepTones() {
   if (!ctx) return;
+  if (muted) { setStatus('transmit muted'); return; }
   const osc = ctx.createOscillator(), g = ctx.createGain();
   osc.connect(g); g.connect(ctx.destination);
   let t = ctx.currentTime + 0.05;
@@ -653,9 +683,49 @@ function showView(name) {
   }
 }
 
+/* ---- Receive-only mute (app-level TX kill switch) ------------------------- */
+// There is no OS/browser "speaker permission", so this is how a phone guarantees it
+// stays receive-only: block every transmit path and grey out the controls.
+function setMuted(m) {
+  muted = m;
+  stopTone(); // silence any tone already sounding
+  const b = $('muteBtn');
+  b.classList.toggle('muted', m);
+  b.setAttribute('aria-pressed', String(m));
+  b.textContent = m ? '🔇 Transmit: off' : '🔊 Transmit: on';
+  ['send', 'tonePlay', 'toneMark', 'toneSpace', 'toneSweep'].forEach((id) => {
+    const el = $(id); if (el) el.disabled = m;
+  });
+  setStatus(m ? 'transmit muted — this phone won’t emit sound' : 'listening · ' + mod.name);
+}
+
+/* ---- Receive-only mute (mic kill switch) --------------------------------- */
+// Releases/re-acquires the actual microphone so the OS "mic in use" indicator
+// reflects reality — the user's proof that nothing is being captured.
+function setMicMutedUI(m) {
+  const b = $('micMuteBtn');
+  b.classList.toggle('muted', m);
+  b.setAttribute('aria-pressed', String(m));
+  b.textContent = m ? '🚫 Mic: muted' : '🎙️ Mic: on';
+  setStatus(m ? 'mic muted — not listening or recording' : 'listening · ' + mod.name);
+}
+
 /* ---- Wire up the UI ------------------------------------------------------- */
 window.addEventListener('DOMContentLoaded', () => {
   $('enable').addEventListener('click', enable);
+  $('muteBtn').addEventListener('click', () => setMuted(!muted));
+  $('micMuteBtn').addEventListener('click', async () => {
+    const b = $('micMuteBtn');
+    if (micMuted) {
+      b.disabled = true;
+      try { await startMic(); setMicMutedUI(false); }
+      catch (e) { setStatus('mic error: ' + e.message); }
+      b.disabled = false;
+    } else {
+      stopMic();
+      setMicMutedUI(true);
+    }
+  });
   $('nav-spectrum').addEventListener('click', () => showView('spectrum'));
   $('nav-tones').addEventListener('click', () => showView('tones'));
   $('nav-messenger').addEventListener('click', () => showView('messenger'));

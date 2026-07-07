@@ -26,6 +26,10 @@
                  color:var(--muted); border-radius:10px; font-size:13px; }
     nav button.active { color:var(--ink); border-color:var(--accent2);
                         box-shadow:0 0 0 1px var(--accent2) inset; }
+    #controls { display:flex; gap:8px; margin-top:8px; }
+    #controls button { flex:1; }
+    .ghost.muted { color:#ff8f8f; border-color:#ff8f8f; box-shadow:0 0 0 1px #ff8f8f inset; }
+    button:disabled { opacity:.45; }
     main { padding:0 16px 40px; max-width:640px; margin:0 auto; }
     .card { background:var(--panel); border:1px solid #26305a; border-radius:14px;
             padding:16px; margin-bottom:14px; }
@@ -81,6 +85,13 @@
   <header>
     <h1>🔊 DSP SoundLab</h1>
     <div id="status">tap “Enable” to begin</div>
+    <!-- Two independent app-level mutes. Neither maps to an OS permission (there's no
+         "speaker permission", and the mic mute goes further than the OS by releasing
+         the device): TX = stop our own sounds, Mic = stop capturing any sound. -->
+    <div id="controls" hidden>
+      <button id="muteBtn" class="ghost" aria-pressed="false">🔊 Transmit: on</button>
+      <button id="micMuteBtn" class="ghost" aria-pressed="false">🎙️ Mic: on</button>
+    </div>
   </header>
 
   <nav>
