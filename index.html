@@ -71,7 +71,9 @@
     .wfwrap { position:relative; line-height:0; }
     .wfwrap canvas { width:100%; border-radius:10px; }
     #waterfall { background:#0b1020; display:block; }
-    #wfguides { position:absolute; left:0; top:0; pointer-events:none; }
+    /* Overlay must be see-through: the generic `canvas` rule above gives every
+       canvas an opaque #0b1020 background, which otherwise hides the waterfall. */
+    #wfguides { position:absolute; left:0; top:0; pointer-events:none; background:transparent; }
   </style>
 </head>
 <body>
