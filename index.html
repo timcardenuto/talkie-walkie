@@ -30,6 +30,11 @@
     #controls button { flex:1; }
     .ghost.muted { color:#ff8f8f; border-color:#ff8f8f; box-shadow:0 0 0 1px #ff8f8f inset; }
     button:disabled { opacity:.45; }
+    /* Fixed + above the enable overlay (z-index 10) so you can read the version
+       without granting the mic. Non-interactive so it never blocks taps. */
+    #version { position:fixed; left:0; right:0; bottom:0; z-index:11; pointer-events:none;
+               text-align:center; color:var(--muted); font-size:11px; padding:4px 0;
+               font-variant-numeric:tabular-nums; }
     main { padding:0 16px 40px; max-width:640px; margin:0 auto; }
     .card { background:var(--panel); border:1px solid #26305a; border-radius:14px;
             padding:16px; margin-bottom:14px; }
@@ -192,6 +197,11 @@
     </section>
   </main>
 
+  <footer id="version" aria-label="app version">—</footer>
+
+  <!-- version.js sets self.__APP_VERSION__ (git describe, stamped at deploy). Load
+       it before app.js so the label and the service worker can read it. -->
+  <script src="./version.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

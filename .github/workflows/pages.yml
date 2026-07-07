@@ -1,0 +1,44 @@
+name: Deploy to GitHub Pages
+
+# Deploys the site on every push to main, stamping the current git version into
+# version.js so the on-screen label reflects exactly what's live.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; newer pushes cancel in-flight runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history + tags so git describe works
+
+      - name: Stamp version
+        run: |
+          VERSION="$(git describe --tags --always --dirty)"
+          printf "self.__APP_VERSION__ = '%s';\n" "$VERSION" > version.js
+          echo "Stamped version: $VERSION"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .               # repo root is the site root (the webapp)
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

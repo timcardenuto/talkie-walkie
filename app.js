@@ -761,5 +761,6 @@ window.addEventListener('DOMContentLoaded', () => {
   $('toneSweep').addEventListener('click', sweepTones);
 
   showView('spectrum');
+  $('version').textContent = 'v' + (self.__APP_VERSION__ || 'dev');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 });

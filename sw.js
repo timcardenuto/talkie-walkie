@@ -5,11 +5,16 @@
  * has the newest files. That means pushing new code propagates on its own — no need
  * to hand-edit this list on every deploy. Still bump CACHE when you want to force a
  * clean wipe of old entries. */
-const CACHE = 'soundlab-v2';
+// Key the cache to the deployed version, so every push lands in a fresh cache and
+// old entries are dropped on activate. version.js is fetched fresh during SW update,
+// so a new deploy is detected and installed automatically.
+importScripts('./version.js');
+const CACHE = 'soundlab-' + (self.__APP_VERSION__ || 'dev');
 const ASSETS = [
   './',
   './index.html',
   './app.js',
+  './version.js',
   './manifest.webmanifest',
   './icon.svg',
   './icon-180.png',
@@ -35,6 +40,21 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   // Only handle same-origin GETs; let everything else hit the network normally.
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+
+  // The version stamp must be accurate the instant you open the page after a deploy,
+  // so fetch it network-first (fall back to cache only when offline).
+  if (new URL(req.url).pathname.endsWith('/version.js')) {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+          return res;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
 
   e.respondWith(
     caches.open(CACHE).then((cache) =>
