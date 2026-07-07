@@ -91,9 +91,10 @@
 </head>
 <body>
   <button id="enable" class="primary">
-    ▶ Enable microphone &amp; audio
-    <p>SoundLab turns your speaker + mic into a modem. Tap to grant mic access,
-       then send a message over sound to another phone.</p>
+    ▶ Enable audio
+    <p>SoundLab turns your speaker + mic into a modem. Tap to start — the mic and
+       transmit both begin <b>off</b>; switch them on with the buttons up top when
+       you're ready. (Turning the mic on will ask for microphone permission.)</p>
     <p id="enableErr" style="color:#ff8f8f;min-height:1em"></p>
   </button>
 
@@ -174,6 +175,11 @@
           <button id="toneEnd" class="ghost">END tone</button>
           <button id="toneSweep" class="ghost">▶ sweep all</button>
         </div>
+        <p class="hint" id="toneHint" style="margin-top:10px">
+          <!-- Filled from the protocol constants at load (see app.js) so it can't drift. -->
+          START and END are the fixed markers that bracket every message; the data tone
+          is one example from the payload band. Sweep all plays START, the current
+          modulation's data tones, then END. Watch them on the Spectrum/waterfall tabs.</p>
       </div>
     </section>
 

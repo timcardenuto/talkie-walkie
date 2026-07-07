@@ -349,18 +349,39 @@ async function enable() {
   try {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
-    await startMic();
+    setupAudioGraph(); // analyser + buffers exist even before a mic is attached
 
     $('enable').style.display = 'none';
     $('controls').hidden = false;
-    setStatus(listeningStatus());
-    drawGuides();
     running = true;
     requestAnimationFrame(loop);
+    drawGuides();
+
+    // Defaults: both kill switches ON. Transmit is off and the mic is NOT acquired
+    // (no permission prompt) until the user turns them on with the buttons.
+    micMuted = true;
+    setMuted(true);
+    setMicMutedUI(true);
   } catch (err) {
     $('enableErr').textContent = 'Could not start: ' + err.message + ' — tap to retry.';
     setStatus('could not start audio: ' + err.message);
   }
+}
+
+// Build the analysis graph once, with no mic connected yet. An AnalyserNode with no
+// input just reads as silence, so the spectrum/waterfall run (flat) until the mic is
+// turned on. startMic() later connects a source into this same analyser.
+function setupAudioGraph() {
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 4096;
+  analyser.smoothingTimeConstant = 0.0;
+  analyser.minDecibels = -100;
+  analyser.maxDecibels = -10;
+  freqData = new Float32Array(analyser.frequencyBinCount);
+  byteData = new Uint8Array(analyser.frequencyBinCount);
+  bandLoBin = freqToBin(BAND_LO);
+  bandHiBin = freqToBin(BAND_HI);
+  capBuf = new Float32Array(Math.ceil(ctx.sampleRate * 1.0)); capPos = 0; // 1 s ring
 }
 
 /* ---- Microphone acquire / release (the RX side; also the mic-mute engine) ---
@@ -373,17 +394,11 @@ async function startMic() {
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
   });
   micSrc = ctx.createMediaStreamSource(micStream);
-  analyser = ctx.createAnalyser();
-  analyser.fftSize = 4096;
-  analyser.smoothingTimeConstant = 0.0;
-  analyser.minDecibels = -100;
-  analyser.maxDecibels = -10;
-  micSrc.connect(analyser);
+  micSrc.connect(analyser); // into the graph built by setupAudioGraph()
 
   // Raw-sample capture path (chirp matched filter + PSK phase need the actual
   // waveform, not just spectra). ScriptProcessor is deprecated but simple and
   // universal; fine for a learning demo.
-  if (!capBuf) { capBuf = new Float32Array(Math.ceil(ctx.sampleRate * 1.0)); capPos = 0; } // 1 s ring
   capNode = ctx.createScriptProcessor(2048, 1, 1);
   capNode.onaudioprocess = (e) => {
     const inp = e.inputBuffer.getChannelData(0);
@@ -393,11 +408,6 @@ async function startMic() {
   };
   const sink = ctx.createGain(); sink.gain.value = 0; // keep the node alive without audible output
   micSrc.connect(capNode); capNode.connect(sink); sink.connect(ctx.destination);
-
-  freqData = new Float32Array(analyser.frequencyBinCount);
-  byteData = new Uint8Array(analyser.frequencyBinCount);
-  bandLoBin = freqToBin(BAND_LO);
-  bandHiBin = freqToBin(BAND_HI);
   micMuted = false;
 }
 
@@ -829,7 +839,7 @@ function setMuted(m) {
   b.classList.toggle('muted', m);
   b.setAttribute('aria-pressed', String(m));
   b.textContent = m ? '🔇 Transmit: off' : '🔊 Transmit: on';
-  ['send', 'tonePlay', 'toneMark', 'toneSpace', 'toneSweep'].forEach((id) => {
+  ['send', 'tonePlay', 'toneMark', 'toneSpace', 'toneEnd', 'toneSweep'].forEach((id) => {
     const el = $(id); if (el) el.disabled = m;
   });
   setStatus(muteStatus());
@@ -899,8 +909,20 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   $('tonePlay').addEventListener('click', () => { if (ctx) startTone(+slider.value); });
   $('toneStop').addEventListener('click', stopTone);
+  // Label the protocol-tone buttons with their real frequencies, straight from the
+  // constants so they can never drift. The "data" example is the data-band centre.
+  const dataTone = Math.round((DATA_LO + DATA_HI) / 2);
+  $('toneMark').textContent = 'START · ' + F_START + ' Hz';
+  $('toneSpace').textContent = 'data · ' + dataTone + ' Hz';
+  $('toneEnd').textContent = 'END · ' + F_END + ' Hz';
+  $('toneHint').innerHTML =
+    '<b>START</b> (' + F_START + ' Hz) and <b>END</b> (' + F_END + ' Hz) are the fixed ' +
+    'markers that bracket every message. <b>data</b> (' + dataTone + ' Hz) is one example ' +
+    'from the ' + DATA_LO + '–' + DATA_HI + ' Hz payload band the data symbols use. ' +
+    '<b>Sweep all</b> plays START, the current modulation’s data tones, then END — the ' +
+    'whole alphabet in order. Watch them on the Spectrum/waterfall tabs.';
   $('toneMark').addEventListener('click', () => { if (ctx) startTone(F_START); });
-  $('toneSpace').addEventListener('click', () => { if (ctx) startTone(2500); });
+  $('toneSpace').addEventListener('click', () => { if (ctx) startTone(dataTone); });
   $('toneEnd').addEventListener('click', () => { if (ctx) startTone(F_END); });
   $('toneSweep').addEventListener('click', sweepTones);
 

@@ -106,6 +106,35 @@ All modulations share the framing above and differ only in how one data symbol o
   1500/3500 Hz; otherwise it's handed to the modulation's decoder.
 - A partially-received frame is abandoned after `RX_TIMEOUT_MS` (2500 ms) of silence.
 
+### Frame validation — "is it really a message?"
+
+A reception is only accepted as genuine when **all three** hold:
+
+1. **It framed.** A START marker opened it and an END marker closed it (a lone START
+   that never sees an END times out as `✗ incomplete`).
+2. **Every symbol was real.** Each burst cleared the loudness floor and the SNR
+   threshold and met the min-duration/gap timing — ambient hiss and clicks are
+   filtered out before they ever become symbols.
+3. **The checksum matched.** The recomputed `sum mod 256` over the payload equals the
+   trailing checksum byte → logged `✓ verified`; otherwise `✗ corrupt`.
+
+So a `✓ verified` means "framed correctly **and** integrity-checked." A false START
+from room noise almost always dies at step 1 or 3, showing as `incomplete`/`corrupt`
+rather than a false accept.
+
+**Known limits (this is a teaching modem, not a hardened link):**
+
+- The checksum is a weak **8-bit additive sum**: random/garbled data has a ~**1/256
+  (0.4%)** chance of passing by coincidence, and it misses byte swaps and
+  compensating errors.
+- There is **no length field, no CRC, and no real preamble** — just a single START
+  tone — so noise can *trigger* a reception (it just rarely survives to `✓`).
+
+**Possible hardening** (all drop into the shared framing): swap the additive byte for
+a **CRC-16** (~1/65536 false-accept, catches burst errors), add a **length field** so
+truncated/overrun frames are rejected outright, and use a **multi-tone sync word**
+instead of a lone START so a stray blip can't begin a reception.
+
 ## Running it
 
 The microphone requires a **secure context**:
