@@ -777,10 +777,13 @@ function transmit(text) {
 function updateSignal(peak) {
   const snr = peak && isFinite(peak.snr) ? peak.snr : 0;
   const bar = $('sigBar');
-  bar.style.width = Math.round(Math.max(0, Math.min(1, snr / 30)) * 100) + '%';
+  // Everything is relative to the threshold so the bar and colour agree: a full bar
+  // means "at the level that decodes". Green = would decode, yellow = within 3 dB of
+  // it (a near miss), red = clearly below — regardless of where you set the slider.
+  bar.style.width = Math.round(Math.max(0, Math.min(1, snr / SNR_DB)) * 100) + '%';
   if (snr >= SNR_DB) { bar.style.background = '#5affa0'; $('sigLabel').textContent = 'signal'; }
-  else if (snr > 3) { bar.style.background = '#ffd75a'; $('sigLabel').textContent = 'faint'; }
-  else { bar.style.background = '#ff8f8f'; $('sigLabel').textContent = 'quiet'; }
+  else if (snr >= SNR_DB - 3) { bar.style.background = '#ffd75a'; $('sigLabel').textContent = 'close'; }
+  else { bar.style.background = '#ff8f8f'; $('sigLabel').textContent = 'weak'; }
 }
 function setRxLive(text) {
   const el = $('rxLive');
