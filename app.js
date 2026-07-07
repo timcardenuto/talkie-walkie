@@ -790,10 +790,55 @@ function logMessage(kind, text, cls) {
 
 /* ---- Tabs ----------------------------------------------------------------- */
 function showView(name) {
-  for (const v of ['spectrum', 'tones', 'messenger', 'constellation']) {
+  for (const v of ['spectrum', 'tones', 'messenger', 'constellation', 'sdr']) {
     $('view-' + v).style.display = (v === name) ? 'block' : 'none';
     $('nav-' + v).classList.toggle('active', v === name);
   }
+  if (name === 'sdr') renderSdrStats();
+}
+
+/* ---- Device (SDR) stats --------------------------------------------------- */
+function fmtHz(hz) {
+  if (!isFinite(hz)) return '—';
+  if (hz >= 1e6) return (hz / 1e6).toFixed(3) + ' MHz';
+  if (hz >= 1e3) return (hz / 1e3).toFixed(hz % 1e3 ? 1 : 0) + ' kHz';
+  return (hz < 100 ? hz.toFixed(1) : Math.round(hz)) + ' Hz';
+}
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+
+// The device-abstraction point: describes whatever is currently capturing. Today
+// that's the mic; a USB-SDR backend would fill these same rows from its own API
+// (tuned frequency, RF bandwidth, gain stages). Values are either read from the
+// device (getSettings) or inferred from the sample rate.
+function deviceStats() {
+  const track = (micStream && micStream.getAudioTracks) ? micStream.getAudioTracks()[0] : null;
+  const s = track ? track.getSettings() : null;
+  const fs = ctx ? ctx.sampleRate : NaN;
+  const on = !!track;
+  const flag = (v) => (v == null ? '—' : v ? 'on' : 'off');
+  return [
+    ['Device', on ? (track.label || 'Microphone') : 'Microphone (inactive — turn mic on)'],
+    ['Type', 'Audio input · real-valued baseband'],
+    ['Sample rate', on ? fmtHz(fs) : '—'],
+    ['Frequency range', on ? '0 – ' + fmtHz(fs / 2) + ' (DC → Nyquist)' : '—'],
+    ['Bandwidth', on ? fmtHz(fs / 2) + ' (real → fs/2)' : '—'],
+    ['Tuning / center', 'N/A · fixed baseband (an SDR tunes here)'],
+    ['FFT size', analyser ? analyser.fftSize + ' pts' : '—'],
+    ['Resolution (RBW)', (on && analyser) ? fmtHz(fs / analyser.fftSize) + '/bin' : '—'],
+    ['Channels', s ? String(s.channelCount || 1) : '—'],
+    ['Gain', 'not exposed by browser'],
+    ['Auto gain (AGC)', s ? (s.autoGainControl ? 'on ⚠︎' : 'off') : '—', !!(s && s.autoGainControl)],
+    ['Echo cancel', flag(s && s.echoCancellation)],
+    ['Noise suppress', flag(s && s.noiseSuppression)],
+  ];
+}
+
+function renderSdrStats() {
+  const el = $('sdrStats'); if (!el) return;
+  el.innerHTML = deviceStats().map(([k, v, warn]) =>
+    '<div class="statrow"><span class="statk">' + esc(k) + '</span>' +
+    '<span class="statv' + (warn ? ' warn' : '') + '">' + esc(v) + '</span></div>'
+  ).join('');
 }
 
 /* ---- Mute state -> status line ------------------------------------------- */
@@ -868,6 +913,7 @@ function setMicMutedUI(m) {
   b.setAttribute('aria-pressed', String(m));
   b.innerHTML = (m ? ICON.micOff : ICON.mic) + (m ? 'Mic: muted' : 'Mic: on');
   setStatus(muteStatus());
+  renderSdrStats(); // keep the Device tab current when the mic toggles
 }
 
 /* ---- Wire up the UI ------------------------------------------------------- */
@@ -890,6 +936,8 @@ window.addEventListener('DOMContentLoaded', () => {
   $('nav-tones').addEventListener('click', () => showView('tones'));
   $('nav-messenger').addEventListener('click', () => showView('messenger'));
   $('nav-constellation').addEventListener('click', () => showView('constellation'));
+  $('nav-sdr').addEventListener('click', () => showView('sdr'));
+  $('sdrRefresh').addEventListener('click', renderSdrStats);
 
   const sel = $('modSelect');
   MODS.forEach((m, i) => {
