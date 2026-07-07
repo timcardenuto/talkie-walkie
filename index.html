@@ -97,9 +97,20 @@
 <body>
   <button id="enable" class="primary">
     ▶ Enable audio
-    <p>SoundLab turns your speaker + mic into a modem. Tap to start — the mic and
-       transmit both begin <b>off</b>; switch them on with the buttons up top when
-       you're ready. (Turning the mic on will ask for microphone permission.)</p>
+    <p>SoundLab turns your speaker + mic into a modem. Tap to start!
+    </p>
+    <p>NOTE: The mic and transmit functions begin in a <b>disabled</b> state and require you to 
+      explicitly toggle them on. Toggling the mic on will ask for microphone permission. They
+      can be toggled on/off whenever you'd like but without the mic there is no data to display
+      on the FFT/PSD or Waterfall plots. 
+    </p>
+    <p> NOTE: This app has no connection to anything online, doesn't save anything (except normal 
+      browser cache that you can clear or use incognito mode). Once you see this you could enable
+      airplane mode and run everything just fine. The link to GitHub is purely to download the 
+      client side HTML/CSS/Javascript that runs in your browser. Modern browsers require client
+      code to run from an HTTPS connection to access the mic so hosting this app as a GitHub 
+      page is a trick to enable that, and also avoid needing to install a permanent app. 
+    </p>
     <p id="enableErr" style="color:#ff8f8f;min-height:1em"></p>
   </button>
 

@@ -446,14 +446,37 @@ function drawSpectrum() {
   if (specMode === 'psd') drawPsd(g, W, H, maxBin);
   else drawFftBars(g, W, H, maxBin);
 
-  drawThreshold(g, W, H); // detection line floating above the live noise floor
+  drawThreshold(g, W, H, maxBin); // detection line floating above the live noise floor
+  drawFreqAxis(g, W, H, maxBin);
+}
+
+// x-axis: kHz ticks across the full 0–5 kHz span, plus START/END markers so you can
+// see exactly where the in-band tones are relative to whatever energy is showing.
+function drawFreqAxis(g, W, H, maxBin) {
+  g.font = '9px system-ui,sans-serif';
+  g.textAlign = 'center';
+  for (let f = 1000; f <= 4000; f += 1000) {
+    const x = (freqToBin(f) / maxBin) * W;
+    g.strokeStyle = 'rgba(255,255,255,0.05)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 12); g.stroke();
+    g.fillStyle = 'rgba(139,150,196,0.9)';
+    g.fillText((f / 1000) + 'k', x, H - 2);
+  }
+  for (const [f, label] of [[F_START, 'START'], [F_END, 'END']]) {
+    const x = (freqToBin(f) / maxBin) * W;
+    g.strokeStyle = 'rgba(124,140,255,0.55)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 12); g.stroke();
+    g.fillStyle = 'rgba(200,210,255,0.9)'; g.textAlign = 'left';
+    g.fillText(label, x + 2, 10);
+    g.textAlign = 'center';
+  }
 }
 
 // The detection rule is "peak must beat the in-band average by SNR_DB", which is a
 // *relative* test — so on an absolute-level plot the threshold is a line SNR_DB above
 // the current noise floor. The vertical gap between the two dashed lines literally IS
 // the SNR requirement; a peak that pokes above the red line is what registers.
-function drawThreshold(g, W, H) {
+function drawThreshold(g, W, H, maxBin) {
   const FLOOR = analyser.minDecibels, CEIL = analyser.maxDecibels;
   const yOf = (db) => H * (1 - (Math.max(FLOOR, Math.min(CEIL, db)) - FLOOR) / (CEIL - FLOOR));
 
@@ -464,19 +487,30 @@ function drawThreshold(g, W, H) {
   const noiseDb = FLOOR + (n ? sum / n : 0) / 255 * (CEIL - FLOOR);
   const yN = yOf(noiseDb), yT = yOf(noiseDb + SNR_DB);
 
+  // Draw ONLY across the detection band, fading out at the edges (roll-off), so it's
+  // clear the threshold governs this band — not the whole 0–5 kHz display.
+  const xLo = (bandLoBin / maxBin) * W, xHi = (bandHiBin / maxBin) * W;
+  const bandLine = (y, rgb, alpha, width) => {
+    const gr = g.createLinearGradient(xLo, 0, xHi, 0);
+    gr.addColorStop(0, `rgba(${rgb},0)`);
+    gr.addColorStop(0.14, `rgba(${rgb},${alpha})`);
+    gr.addColorStop(0.86, `rgba(${rgb},${alpha})`);
+    gr.addColorStop(1, `rgba(${rgb},0)`);
+    g.strokeStyle = gr; g.lineWidth = width;
+    g.beginPath(); g.moveTo(xLo, y); g.lineTo(xHi, y); g.stroke();
+  };
+
   g.save();
-  g.setLineDash([4, 4]); g.lineWidth = 1;
-  g.strokeStyle = 'rgba(139,150,196,0.6)';                 // noise floor
-  g.beginPath(); g.moveTo(0, yN); g.lineTo(W, yN); g.stroke();
-  g.strokeStyle = '#ff8f8f'; g.lineWidth = 1.5;            // detection threshold
-  g.beginPath(); g.moveTo(0, yT); g.lineTo(W, yT); g.stroke();
+  g.setLineDash([4, 4]);
+  bandLine(yN, '139,150,196', 0.7, 1);   // noise floor
+  bandLine(yT, '255,143,143', 1, 1.5);   // detection threshold
   g.setLineDash([]);
 
   g.font = '10px system-ui,sans-serif'; g.textAlign = 'right';
   g.fillStyle = '#ff8f8f';
-  g.fillText('detect ▸ noise + ' + SNR_DB + ' dB', W - 4, Math.max(yT - 3, 10));
-  g.fillStyle = 'rgba(139,150,196,0.85)';
-  g.fillText('noise floor', W - 4, Math.min(yN + 12, H - 3));
+  g.fillText('detect ▸ noise + ' + SNR_DB + ' dB', xHi - 2, Math.max(yT - 3, 10));
+  g.fillStyle = 'rgba(139,150,196,0.9)';
+  g.fillText('noise', xHi - 2, Math.min(yN + 12, H - 15));
   g.restore();
 }
 
@@ -624,9 +658,13 @@ function peakInBand() {
 function decodeStep() {
   const now = performance.now();
   const peak = peakInBand();
+  // A burst only "counts" when it clears BOTH the absolute floor and the SNR
+  // threshold. Use that same test for "now hearing", so the readout previews what
+  // would actually register — not a faint peak that merely beats a very quiet band.
+  const present = !!(peak && peak.peakDb >= ABS_FLOOR && peak.snr >= SNR_DB);
   signalSNR = peak ? peak.snr : -Infinity;
   updateSignal(peak);
-  $('hearing').textContent = (peak && peak.snr >= SNR_DB) ? Math.round(peak.freq) + ' Hz' : '—';
+  $('hearing').textContent = present ? Math.round(peak.freq) + ' Hz' : '—';
 
   if (rxActive && (now - lastRxSymbolT) > RX_TIMEOUT_MS) {
     rxActive = false; setRxLive('');
@@ -634,7 +672,6 @@ function decodeStep() {
     setStatus(listeningStatus());
   }
 
-  const present = peak && peak.peakDb >= ABS_FLOOR && peak.snr >= SNR_DB;
   if (present) {
     if (!inTone) { inTone = true; toneStartT = now; burstFrames = []; }
     burstFrames.push(peak);
@@ -823,13 +860,14 @@ function deviceStats() {
     ['Frequency range', on ? '0 – ' + fmtHz(fs / 2) + ' (DC → Nyquist)' : '—'],
     ['Bandwidth', on ? fmtHz(fs / 2) + ' (real → fs/2)' : '—'],
     ['Tuning / center', 'N/A · fixed baseband (an SDR tunes here)'],
-    ['FFT size', analyser ? analyser.fftSize + ' pts' : '—'],
+    ['FFT size', (on && analyser) ? analyser.fftSize + ' pts' : '—'],
     ['Resolution (RBW)', (on && analyser) ? fmtHz(fs / analyser.fftSize) + '/bin' : '—'],
     ['Channels', s ? String(s.channelCount || 1) : '—'],
     ['Gain', 'not exposed by browser'],
     ['Auto gain (AGC)', s ? (s.autoGainControl ? 'on ⚠︎' : 'off') : '—', !!(s && s.autoGainControl)],
     ['Echo cancel', flag(s && s.echoCancellation)],
     ['Noise suppress', flag(s && s.noiseSuppression)],
+    ['Updated', new Date().toLocaleTimeString()], // changes each render → proves refresh fired
   ];
 }
 
