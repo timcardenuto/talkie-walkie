@@ -331,6 +331,9 @@ let bandLoBin = 0, bandHiBin = 0;
 let running = false;
 let wfRow = null;          // reusable 1-pixel-tall ImageData for the waterfall
 let signalSNR = -Infinity; // loudest in-band peak above the noise floor, in dB
+let specMode = 'fft';      // 'fft' = instantaneous magnitude bars; 'psd' = averaged trace
+let psdFloat = null, psdAvg = null; // scratch + running power average for the PSD view
+const PSD_ALPHA = 0.15;    // Welch-ish EMA weight per frame (lower = smoother/slower)
 let capBuf = null, capPos = 0, capTotal = 0; // ring buffer + absolute sample clock
 let constPoints = [];      // recent DBPSK phasors for the constellation view
 let dbpskPrev = null;      // previous DBPSK symbol phase (for differential decode)
@@ -449,20 +452,72 @@ function drawSnrMeter() {
   g.fillText(Math.round(Math.max(0, snr)) + '', W / 2, H - 3);
 }
 
-/* ---- Instantaneous spectrum ----------------------------------------------- */
+/* ---- Spectrum: FFT bars or averaged PSD trace ----------------------------- */
 function drawSpectrum() {
   const cv = $('spectrum'), g = cv.getContext('2d');
-  const W = cv.width, H = cv.height;
-  analyser.getByteFrequencyData(byteData);
+  const W = cv.width, H = cv.height, maxBin = freqToBin(5000);
+  analyser.getByteFrequencyData(byteData); // always refresh — the waterfall reuses it
   g.fillStyle = '#0b1020'; g.fillRect(0, 0, W, H);
-  const maxBin = freqToBin(5000), barW = W / maxBin;
+  // Shaded data-tone band (common to both views).
   const bx = (bandLoBin / maxBin) * W, bw = ((bandHiBin - bandLoBin) / maxBin) * W;
   g.fillStyle = 'rgba(90,140,255,0.12)'; g.fillRect(bx, 0, bw, H);
+
+  if (specMode === 'psd') drawPsd(g, W, H, maxBin);
+  else drawFftBars(g, W, H, maxBin);
+}
+
+// Raw, instantaneous magnitude — jumpy but responsive.
+function drawFftBars(g, W, H, maxBin) {
+  const barW = W / maxBin;
+  g.fillStyle = '#5ad1ff';
   for (let b = 0; b < maxBin; b++) {
     const h = (byteData[b] / 255) * H;
-    g.fillStyle = '#5ad1ff';
     g.fillRect(b * barW, H - h, Math.max(1, barW), h);
   }
+}
+
+// Power spectral density: exponentially time-average the power (Welch-style), then
+// draw a smooth filled trace with a dB grid — the calmer spectrum-analyzer look.
+function drawPsd(g, W, H, maxBin) {
+  const n = analyser.frequencyBinCount;
+  if (!psdFloat || psdFloat.length !== n) { psdFloat = new Float32Array(n); psdAvg = null; }
+  analyser.getFloatFrequencyData(psdFloat); // magnitude in dB (10·log10 power)
+  if (!psdAvg) { psdAvg = new Float32Array(n); for (let i = 0; i < n; i++) psdAvg[i] = 1e-10; }
+  for (let b = 0; b < maxBin; b++) {
+    const lin = Math.pow(10, psdFloat[b] / 10);          // dB -> linear power
+    psdAvg[b] = PSD_ALPHA * lin + (1 - PSD_ALPHA) * psdAvg[b]; // average in power domain
+  }
+
+  const FLOOR = analyser.minDecibels, CEIL = analyser.maxDecibels; // -100 .. -10
+  const yOf = (db) => H * (1 - (Math.max(FLOOR, Math.min(CEIL, db)) - FLOOR) / (CEIL - FLOOR));
+
+  // dB grid + labels.
+  g.strokeStyle = 'rgba(255,255,255,0.06)'; g.fillStyle = 'rgba(139,150,196,0.7)';
+  g.font = '9px system-ui,sans-serif'; g.textAlign = 'left'; g.lineWidth = 1;
+  for (let db = Math.ceil(FLOOR / 20) * 20; db <= CEIL; db += 20) {
+    const y = yOf(db);
+    g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+    g.fillText(db + ' dB', 3, y - 2);
+  }
+
+  // Filled trace.
+  g.beginPath();
+  for (let b = 0; b < maxBin; b++) {
+    const db = 10 * Math.log10(psdAvg[b] + 1e-12);
+    const x = (b / maxBin) * W, y = yOf(db);
+    b === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  }
+  g.lineTo(W, H); g.lineTo(0, H); g.closePath();
+  g.fillStyle = 'rgba(90,209,255,0.18)'; g.fill();
+
+  // Bright stroke on top.
+  g.beginPath();
+  for (let b = 0; b < maxBin; b++) {
+    const db = 10 * Math.log10(psdAvg[b] + 1e-12);
+    const x = (b / maxBin) * W, y = yOf(db);
+    b === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  }
+  g.strokeStyle = '#5ad1ff'; g.lineWidth = 1.5; g.stroke();
 }
 
 /* ---- Waterfall (spectrogram) ---------------------------------------------- */
@@ -757,6 +812,13 @@ function bindSnrControls() {
   apply(SNR_DB); // sync both to the real default on load
 }
 
+function setSpecMode(m) {
+  specMode = m;
+  if (m === 'psd') psdAvg = null; // restart the running average cleanly
+  $('specFft').classList.toggle('active', m === 'fft');
+  $('specPsd').classList.toggle('active', m === 'psd');
+}
+
 /* ---- Receive-only mute (app-level TX kill switch) ------------------------- */
 // There is no OS/browser "speaker permission", so this is how a phone guarantees it
 // stays receive-only: block every transmit path and grey out the controls.
@@ -821,6 +883,8 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 
   bindSnrControls();
+  $('specFft').addEventListener('click', () => setSpecMode('fft'));
+  $('specPsd').addEventListener('click', () => setSpecMode('psd'));
 
   $('send').addEventListener('click', () => {
     const text = $('message').value.trim();
