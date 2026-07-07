@@ -333,6 +333,11 @@ let wfRow = null;          // reusable 1-pixel-tall ImageData for the waterfall
 let specMode = 'fft';      // 'fft' = instantaneous magnitude bars; 'psd' = averaged trace
 let psdFloat = null, psdAvg = null; // scratch + running power average for the PSD view
 const PSD_ALPHA = 0.15;    // Welch-ish EMA weight per frame (lower = smoother/slower)
+// Display window (the "tuning" knobs) — center frequency + span, like an SDR. For the
+// mic these just pan/zoom the plots. vLo/vHi/vLoBin/vHiBin are the resolved window,
+// recomputed each frame by updateView().
+let viewCenterHz = 2500, viewSpanHz = 5000;
+let vLo = 0, vHi = 5000, vLoBin = 0, vHiBin = 1;
 let capBuf = null, capPos = 0, capTotal = 0; // ring buffer + absolute sample clock
 let constPoints = [];      // recent DBPSK phasors for the constellation view
 let dbpskPrev = null;      // previous DBPSK symbol phase (for differential decode)
@@ -349,6 +354,11 @@ async function enable() {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
     setupAudioGraph(); // analyser + buffers exist even before a mic is attached
+
+    // Tuning knobs can now span the device's full range (0 → Nyquist = sampleRate/2).
+    const nyq = Math.round(ctx.sampleRate / 2);
+    $('viewCenter').max = nyq;
+    $('viewSpan').max = nyq;
 
     $('enable').style.display = 'none';
     $('controls').hidden = false;
@@ -425,6 +435,7 @@ function stopMic() {
 /* ---- Per-frame loop ------------------------------------------------------- */
 function loop() {
   if (!running) return;
+  updateView();     // resolve the center/span knobs for this frame
   drawSpectrum();   // refreshes byteData + draws the instantaneous bars
   drawWaterfall();  // reuses byteData for its new row
   if (!micMuted) decodeStep(); // mic released → nothing to decode
@@ -432,37 +443,56 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+/* ---- Display window (tuning) --------------------------------------------- */
+// Resolve center/span into a pixel-mappable window, clamped to [0, Nyquist].
+function updateView() {
+  const nyq = ctx ? ctx.sampleRate / 2 : 24000;
+  vLo = Math.max(0, viewCenterHz - viewSpanHz / 2);
+  vHi = Math.min(nyq, viewCenterHz + viewSpanHz / 2);
+  if (vHi <= vLo + 50) vHi = vLo + 50;
+  const maxIdx = (analyser ? analyser.frequencyBinCount : 2048) - 1;
+  vLoBin = Math.max(0, Math.min(maxIdx, freqToBin(vLo)));
+  vHiBin = Math.max(vLoBin + 1, Math.min(maxIdx, freqToBin(vHi)));
+}
+const xHz = (hz, W) => (hz - vLo) / (vHi - vLo) * W;              // Hz  -> pixel x
+const xBin = (b, W) => (b - vLoBin) / (vHiBin - vLoBin) * W;      // bin -> pixel x
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
+  return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * p;
+}
+const fmtAxis = (hz) => hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? 1 : 0) + 'k' : Math.round(hz) + '';
+
 /* ---- Spectrum: FFT bars or averaged PSD trace ----------------------------- */
 function drawSpectrum() {
   const cv = $('spectrum'), g = cv.getContext('2d');
-  const W = cv.width, H = cv.height, maxBin = freqToBin(5000);
+  const W = cv.width, H = cv.height;
   analyser.getByteFrequencyData(byteData); // always refresh — the waterfall reuses it
   g.fillStyle = '#0b1020'; g.fillRect(0, 0, W, H);
-  // Shaded data-tone band (common to both views).
-  const bx = (bandLoBin / maxBin) * W, bw = ((bandHiBin - bandLoBin) / maxBin) * W;
-  g.fillStyle = 'rgba(90,140,255,0.12)'; g.fillRect(bx, 0, bw, H);
+  // Shaded detection band, clipped to the current view.
+  const bx = Math.max(0, xHz(BAND_LO, W)), bx2 = Math.min(W, xHz(BAND_HI, W));
+  if (bx2 > bx) { g.fillStyle = 'rgba(90,140,255,0.12)'; g.fillRect(bx, 0, bx2 - bx, H); }
 
-  if (specMode === 'psd') drawPsd(g, W, H, maxBin);
-  else drawFftBars(g, W, H, maxBin);
+  if (specMode === 'psd') drawPsd(g, W, H);
+  else drawFftBars(g, W, H);
 
-  drawThreshold(g, W, H, maxBin); // detection line floating above the live noise floor
-  drawFreqAxis(g, W, H, maxBin);
+  drawThreshold(g, W, H); // detection line floating above the live noise floor
+  drawFreqAxis(g, W, H);
 }
 
-// x-axis: kHz ticks across the full 0–5 kHz span, plus START/END markers so you can
-// see exactly where the in-band tones are relative to whatever energy is showing.
-function drawFreqAxis(g, W, H, maxBin) {
-  g.font = '9px system-ui,sans-serif';
-  g.textAlign = 'center';
-  for (let f = 1000; f <= 4000; f += 1000) {
-    const x = (freqToBin(f) / maxBin) * W;
+// x-axis: kHz ticks spanning the current view, plus START/END markers (when visible).
+function drawFreqAxis(g, W, H) {
+  const step = niceStep((vHi - vLo) / 5);
+  g.font = '9px system-ui,sans-serif'; g.textAlign = 'center';
+  for (let f = Math.ceil(vLo / step) * step; f <= vHi; f += step) {
+    const x = xHz(f, W);
     g.strokeStyle = 'rgba(255,255,255,0.05)'; g.lineWidth = 1;
     g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 12); g.stroke();
     g.fillStyle = 'rgba(139,150,196,0.9)';
-    g.fillText((f / 1000) + 'k', x, H - 2);
+    g.fillText(fmtAxis(f), x, H - 2);
   }
   for (const [f, label] of [[F_START, 'START'], [F_END, 'END']]) {
-    const x = (freqToBin(f) / maxBin) * W;
+    const x = xHz(f, W);
+    if (x < 0 || x > W) continue;
     g.strokeStyle = 'rgba(124,140,255,0.55)'; g.lineWidth = 1;
     g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 12); g.stroke();
     g.fillStyle = 'rgba(200,210,255,0.9)'; g.textAlign = 'left';
@@ -475,7 +505,7 @@ function drawFreqAxis(g, W, H, maxBin) {
 // *relative* test — so on an absolute-level plot the threshold is a line SNR_DB above
 // the current noise floor. The vertical gap between the two dashed lines literally IS
 // the SNR requirement; a peak that pokes above the red line is what registers.
-function drawThreshold(g, W, H, maxBin) {
+function drawThreshold(g, W, H) {
   const FLOOR = analyser.minDecibels, CEIL = analyser.maxDecibels;
   const yOf = (db) => H * (1 - (Math.max(FLOOR, Math.min(CEIL, db)) - FLOOR) / (CEIL - FLOOR));
 
@@ -490,64 +520,67 @@ function drawThreshold(g, W, H, maxBin) {
   const noiseDb = FLOOR + (n ? sum / n : 0) / 255 * (CEIL - FLOOR);
   const yN = yOf(noiseDb), yT = yOf(noiseDb + SNR_DB);
 
-  // Draw ONLY across the detection band, fading out at the edges (roll-off), so it's
-  // clear the threshold governs this band — not the whole 0–5 kHz display.
-  const xLo = (bandLoBin / maxBin) * W, xHi = (bandHiBin / maxBin) * W;
-  const bandLine = (y, rgb, alpha, width) => {
-    const gr = g.createLinearGradient(xLo, 0, xHi, 0);
-    gr.addColorStop(0, `rgba(${rgb},0)`);
-    gr.addColorStop(0.14, `rgba(${rgb},${alpha})`);
-    gr.addColorStop(0.86, `rgba(${rgb},${alpha})`);
-    gr.addColorStop(1, `rgba(${rgb},0)`);
-    g.strokeStyle = gr; g.lineWidth = width;
-    g.beginPath(); g.moveTo(xLo, y); g.lineTo(xHi, y); g.stroke();
-  };
-
   g.save();
-  g.setLineDash([4, 4]);
-  bandLine(yN, '139,150,196', 0.7, 1);   // noise floor
-  bandLine(yT, '255,143,143', 1, 1.5);   // detection threshold
-  g.setLineDash([]);
-
-  g.font = '10px system-ui,sans-serif'; g.textAlign = 'right';
-  g.fillStyle = '#ff8f8f';
-  g.fillText('detect ▸ noise + ' + SNR_DB + ' dB', xHi - 2, Math.max(yT - 3, 10));
-  g.fillStyle = 'rgba(139,150,196,0.9)';
-  g.fillText('noise', xHi - 2, Math.min(yN + 12, H - 15));
+  // Draw ONLY across the detection band (clipped to the view), fading out at the edges
+  // (roll-off), so it's clear the threshold governs this band — not the whole display.
+  const xLo = Math.max(0, xHz(BAND_LO, W)), xHi = Math.min(W, xHz(BAND_HI, W));
+  if (xHi > xLo + 1) {
+    const bandLine = (y, rgb, alpha, width) => {
+      const gr = g.createLinearGradient(xLo, 0, xHi, 0);
+      gr.addColorStop(0, `rgba(${rgb},0)`);
+      gr.addColorStop(0.14, `rgba(${rgb},${alpha})`);
+      gr.addColorStop(0.86, `rgba(${rgb},${alpha})`);
+      gr.addColorStop(1, `rgba(${rgb},0)`);
+      g.strokeStyle = gr; g.lineWidth = width;
+      g.beginPath(); g.moveTo(xLo, y); g.lineTo(xHi, y); g.stroke();
+    };
+    g.setLineDash([4, 4]);
+    bandLine(yN, '139,150,196', 0.7, 1);   // noise floor
+    bandLine(yT, '255,143,143', 1, 1.5);   // detection threshold
+    g.setLineDash([]);
+    g.font = '10px system-ui,sans-serif'; g.textAlign = 'right';
+    g.fillStyle = '#ff8f8f';
+    g.fillText('detect ▸ noise + ' + SNR_DB + ' dB', xHi - 2, Math.max(yT - 3, 10));
+    g.fillStyle = 'rgba(139,150,196,0.9)';
+    g.fillText('noise', xHi - 2, Math.min(yN + 12, H - 15));
+  }
 
   // Peak marker: the loudest in-band bin — green if it clears the threshold (would
-  // register), yellow if not. This is the peak "now hearing" reports.
+  // register), yellow if not. This is the peak "now hearing" reports. Only when in view.
   if (peakBin >= 0 && peakVal > 0) {
-    const peakDb = FLOOR + peakVal / 255 * (CEIL - FLOOR);
-    const above = (peakDb - noiseDb) >= SNR_DB;
-    const px = (peakBin / maxBin) * W, py = yOf(peakDb);
-    g.fillStyle = above ? '#5affa0' : '#ffd75a';
-    g.beginPath(); g.arc(px, py, 3.5, 0, 2 * Math.PI); g.fill();
-    g.textAlign = 'center';
-    const hz = Math.round((peakBin * ctx.sampleRate) / analyser.fftSize);
-    g.fillText(hz + ' Hz', px, Math.max(py - 7, 8));
+    const px = xBin(peakBin, W);
+    if (px >= 0 && px <= W) {
+      const peakDb = FLOOR + peakVal / 255 * (CEIL - FLOOR);
+      const above = (peakDb - noiseDb) >= SNR_DB;
+      const py = yOf(peakDb);
+      g.fillStyle = above ? '#5affa0' : '#ffd75a';
+      g.beginPath(); g.arc(px, py, 3.5, 0, 2 * Math.PI); g.fill();
+      g.textAlign = 'center';
+      const hz = Math.round((peakBin * ctx.sampleRate) / analyser.fftSize);
+      g.fillText(hz + ' Hz', px, Math.max(py - 7, 8));
+    }
   }
   g.restore();
 }
 
 // Raw, instantaneous magnitude — jumpy but responsive.
-function drawFftBars(g, W, H, maxBin) {
-  const barW = W / maxBin;
+function drawFftBars(g, W, H) {
+  const span = vHiBin - vLoBin, barW = W / span;
   g.fillStyle = '#5ad1ff';
-  for (let b = 0; b < maxBin; b++) {
+  for (let b = vLoBin; b <= vHiBin; b++) {
     const h = (byteData[b] / 255) * H;
-    g.fillRect(b * barW, H - h, Math.max(1, barW), h);
+    g.fillRect((b - vLoBin) * barW, H - h, Math.max(1, barW), h);
   }
 }
 
 // Power spectral density: exponentially time-average the power (Welch-style), then
 // draw a smooth filled trace with a dB grid — the calmer spectrum-analyzer look.
-function drawPsd(g, W, H, maxBin) {
+function drawPsd(g, W, H) {
   const n = analyser.frequencyBinCount;
   if (!psdFloat || psdFloat.length !== n) { psdFloat = new Float32Array(n); psdAvg = null; }
   analyser.getFloatFrequencyData(psdFloat); // magnitude in dB (10·log10 power)
   if (!psdAvg) { psdAvg = new Float32Array(n); for (let i = 0; i < n; i++) psdAvg[i] = 1e-10; }
-  for (let b = 0; b < maxBin; b++) {
+  for (let b = 0; b < n; b++) {   // average all bins so panning doesn't reset history
     const lin = Math.pow(10, psdFloat[b] / 10);          // dB -> linear power
     psdAvg[b] = PSD_ALPHA * lin + (1 - PSD_ALPHA) * psdAvg[b]; // average in power domain
   }
@@ -564,34 +597,28 @@ function drawPsd(g, W, H, maxBin) {
     g.fillText(db + ' dB', 3, y - 2);
   }
 
-  // Filled trace.
-  g.beginPath();
-  for (let b = 0; b < maxBin; b++) {
-    const db = 10 * Math.log10(psdAvg[b] + 1e-12);
-    const x = (b / maxBin) * W, y = yOf(db);
-    b === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
-  }
-  g.lineTo(W, H); g.lineTo(0, H); g.closePath();
+  const span = vHiBin - vLoBin;
+  const trace = () => {
+    g.beginPath();
+    for (let b = vLoBin; b <= vHiBin; b++) {
+      const db = 10 * Math.log10(psdAvg[b] + 1e-12);
+      const x = ((b - vLoBin) / span) * W, y = yOf(db);
+      b === vLoBin ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+  };
+  trace(); g.lineTo(W, H); g.lineTo(0, H); g.closePath();
   g.fillStyle = 'rgba(90,209,255,0.18)'; g.fill();
-
-  // Bright stroke on top.
-  g.beginPath();
-  for (let b = 0; b < maxBin; b++) {
-    const db = 10 * Math.log10(psdAvg[b] + 1e-12);
-    const x = (b / maxBin) * W, y = yOf(db);
-    b === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
-  }
-  g.strokeStyle = '#5ad1ff'; g.lineWidth = 1.5; g.stroke();
+  trace(); g.strokeStyle = '#5ad1ff'; g.lineWidth = 1.5; g.stroke();
 }
 
 /* ---- Waterfall (spectrogram) ---------------------------------------------- */
 function drawWaterfall() {
   const cv = $('waterfall'), g = cv.getContext('2d');
-  const W = cv.width, H = cv.height, maxBin = freqToBin(5000);
+  const W = cv.width, H = cv.height, span = vHiBin - vLoBin;
   if (!wfRow || wfRow.width !== W) wfRow = g.createImageData(W, 1);
   const d = wfRow.data;
   for (let x = 0; x < W; x++) {
-    const c = heat(byteData[Math.floor((x / W) * maxBin)] / 255);
+    const c = heat(byteData[vLoBin + Math.floor((x / W) * span)] / 255);
     const i = x * 4; d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = 255;
   }
   // Scroll down one pixel by copying pixels explicitly. (Drawing the canvas onto
@@ -613,25 +640,30 @@ function heat(v) {
 // Static overlay: a guide line at each of the current modulation's tones.
 function drawGuides() {
   const cv = $('wfguides'), g = cv.getContext('2d');
-  const W = cv.width, H = cv.height, maxBin = freqToBin(5000);
+  const W = cv.width, H = cv.height;
+  updateView(); // called outside the render loop (on enable / mod / tuning change)
   g.clearRect(0, 0, W, H);
   for (const f of mod.guides()) {
-    const x = (freqToBin(f) / maxBin) * W;
+    const x = xHz(f, W);
+    if (x < 0 || x > W) continue;
     g.strokeStyle = 'rgba(255,255,255,0.12)';
     g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
   }
   for (const [f, label] of [[F_START, 'START'], [F_END, 'END']]) {
-    const x = (freqToBin(f) / maxBin) * W;
+    const x = xHz(f, W);
+    if (x < 0 || x > W) continue;
     g.strokeStyle = 'rgba(124,140,255,0.55)';
     g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
     g.fillStyle = 'rgba(200,210,255,0.75)'; g.font = '10px system-ui,sans-serif';
     g.fillText(label, x + 3, 12);
   }
-  // kHz scale along the bottom, matching the spectrum's x-axis (0–5 kHz span).
+  // kHz scale along the bottom, matching the spectrum's x-axis.
+  const step = niceStep((vHi - vLo) / 5);
   g.font = '9px system-ui,sans-serif'; g.textAlign = 'center';
   g.fillStyle = 'rgba(139,150,196,0.9)';
-  for (let f = 1000; f <= 4000; f += 1000) {
-    g.fillText((f / 1000) + 'k', (freqToBin(f) / maxBin) * W, H - 3);
+  for (let f = Math.ceil(vLo / step) * step; f <= vHi; f += step) {
+    const x = xHz(f, W);
+    if (x >= 0 && x <= W) g.fillText(fmtAxis(f), x, H - 3);
   }
   g.textAlign = 'left';
 }
@@ -874,7 +906,7 @@ function showView(name) {
     $('view-' + v).style.display = (v === name) ? 'block' : 'none';
     $('nav-' + v).classList.toggle('active', v === name);
   }
-  if (name === 'sdr') renderSdrStats();
+  if (name === 'sdr') { populateDeviceSelect(); renderSdrStats(); }
 }
 
 /* ---- Device (SDR) stats --------------------------------------------------- */
@@ -890,7 +922,12 @@ const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;
 // that's the mic; a USB-SDR backend would fill these same rows from its own API
 // (tuned frequency, RF bandwidth, gain stages). Values are either read from the
 // device (getSettings) or inferred from the sample rate.
+// Dispatcher: describe whichever source is selected on the SDR tab.
 function deviceStats() {
+  return sdrDevice ? sdrDeviceStats(sdrDevice) : micDeviceStats();
+}
+
+function micDeviceStats() {
   const track = (micStream && micStream.getAudioTracks) ? micStream.getAudioTracks()[0] : null;
   const s = track ? track.getSettings() : null;
   const fs = ctx ? ctx.sampleRate : NaN;
@@ -920,6 +957,131 @@ function renderSdrStats() {
     '<div class="statrow"><span class="statk">' + esc(k) + '</span>' +
     '<span class="statv' + (warn ? ' warn' : '') + '">' + esc(v) + '</span></div>'
   ).join('');
+}
+
+/* ---- WebUSB SDR device management (RTL-SDR RX first) -----------------------
+ * Chrome/Edge/Opera only (desktop + Android); no iOS/Safari/Firefox. This step
+ * discovers/selects the device and reports its descriptors; a connection test
+ * proves the browser can claim the interface. Actual IQ streaming (the RTL2832U
+ * driver) is the next step and plugs in behind selectSource(). */
+const RTLSDR_FILTERS = [{ vendorId: 0x0bda }]; // Realtek RTL2832U (0x2832/0x2838/rebrands)
+let sdrDevice = null; // selected WebUSB device, or null = microphone
+
+const usbSupported = () => typeof navigator !== 'undefined' && !!navigator.usb;
+const hex4 = (v) => '0x' + (v >>> 0).toString(16).padStart(4, '0');
+const usbKey = (d) => 'usb:' + (d.serialNumber || (d.vendorId + '-' + d.productId));
+
+function showUsbNote(msg, warn) {
+  const el = $('usbNote'); if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = warn ? '#ff8f8f' : '#ffd75a';
+  el.style.display = msg ? 'block' : 'none';
+}
+
+// Summarize the first bulk IN endpoint (RTL-SDR streams IQ over it, usually EP 1 IN).
+function bulkInInfo(d) {
+  const cfg = (d.configurations && d.configurations[0]) || null;
+  if (!cfg) return '—';
+  for (const iface of cfg.interfaces) {
+    for (const alt of iface.alternates) {
+      for (const ep of alt.endpoints) {
+        if (ep.direction === 'in' && ep.type === 'bulk') {
+          return 'EP ' + ep.endpointNumber + ' · ' + ep.packetSize + ' B';
+        }
+      }
+    }
+  }
+  return 'none found';
+}
+
+function sdrDeviceStats(d) {
+  const cfg = (d.configurations && d.configurations[0]) || null;
+  return [
+    ['Device', d.productName || 'RTL-SDR'],
+    ['Type', 'USB SDR (WebUSB) · complex IQ'],
+    ['USB ID', hex4(d.vendorId) + ' : ' + hex4(d.productId)],
+    ['Manufacturer', d.manufacturerName || '—'],
+    ['Serial', d.serialNumber || '—'],
+    ['USB version', d.usbVersionMajor + '.' + d.usbVersionMinor],
+    ['Interfaces', cfg ? String(cfg.interfaces.length) : '—'],
+    ['Bulk IN (IQ)', bulkInInfo(d)],
+    ['Tuner range', '≈24 MHz – 1.7 GHz (nominal, R820T-class)'],
+    ['Max sample rate', '≈2.4 MS/s (nominal)'],
+    ['Gain', 'tuner gain — set once streaming'],
+    ['Status', d.opened ? 'open' : 'selected · info only (streaming not yet wired)', !d.opened],
+    ['Updated', new Date().toLocaleTimeString()],
+  ];
+}
+
+async function populateDeviceSelect() {
+  const sel = $('deviceSel'); if (!sel) return;
+  sel.innerHTML = '';
+  const mic = document.createElement('option');
+  mic.value = 'mic'; mic.textContent = 'Microphone';
+  sel.appendChild(mic);
+  if (usbSupported()) {
+    const devs = await navigator.usb.getDevices();
+    for (const d of devs) {
+      const o = document.createElement('option');
+      o.value = usbKey(d);
+      o.textContent = (d.productName || 'USB SDR') + ' (' + hex4(d.vendorId) + ':' + hex4(d.productId) + ')';
+      sel.appendChild(o);
+    }
+  }
+  sel.value = sdrDevice ? usbKey(sdrDevice) : 'mic';
+}
+
+async function connectSdr() {
+  if (!usbSupported()) {
+    showUsbNote('WebUSB isn’t available here — use Chrome/Edge/Opera on desktop or Android (not iOS/Safari/Firefox).', true);
+    return;
+  }
+  try {
+    sdrDevice = await navigator.usb.requestDevice({ filters: RTLSDR_FILTERS });
+    showUsbNote('');
+    await populateDeviceSelect();
+    renderSdrStats();
+  } catch (e) {
+    if (e && e.name !== 'NotFoundError') showUsbNote('Connect failed: ' + e.message, true); // NotFound = cancelled
+  }
+}
+
+async function selectFromDropdown() {
+  const v = $('deviceSel').value;
+  if (v === 'mic' || !usbSupported()) { sdrDevice = null; }
+  else {
+    const devs = await navigator.usb.getDevices();
+    sdrDevice = devs.find((d) => usbKey(d) === v) || null;
+  }
+  showUsbNote('');
+  renderSdrStats();
+}
+
+async function forgetSdr() {
+  const d = sdrDevice;
+  sdrDevice = null;
+  if (d && d.forget) { try { await d.forget(); } catch (_) {} }
+  await populateDeviceSelect();
+  renderSdrStats();
+}
+
+// Prove the browser can actually grab the dongle (the step most likely to fail —
+// e.g. a kernel driver holding it on desktop Linux). Opens → claims → releases.
+async function testSdr() {
+  if (!sdrDevice) { showUsbNote('Select a USB SDR first.', true); return; }
+  const d = sdrDevice;
+  try {
+    await d.open();
+    if (!d.configuration) await d.selectConfiguration(1);
+    await d.claimInterface(0);
+    showUsbNote('✓ Connected: opened and claimed interface 0. Ready for streaming.', false);
+    await d.releaseInterface(0);
+    await d.close();
+  } catch (e) {
+    showUsbNote('✗ ' + e.message + ' (another driver may hold the device)', true);
+    try { await d.close(); } catch (_) {}
+  }
+  renderSdrStats();
 }
 
 /* ---- Mute state -> status line ------------------------------------------- */
@@ -1019,6 +1181,20 @@ window.addEventListener('DOMContentLoaded', () => {
   $('nav-constellation').addEventListener('click', () => showView('constellation'));
   $('nav-sdr').addEventListener('click', () => showView('sdr'));
   $('sdrRefresh').addEventListener('click', renderSdrStats);
+  $('sdrConnect').addEventListener('click', connectSdr);
+  $('sdrTest').addEventListener('click', testSdr);
+  $('sdrForget').addEventListener('click', forgetSdr);
+  $('deviceSel').addEventListener('change', selectFromDropdown);
+  if (usbSupported()) {
+    navigator.usb.addEventListener('connect', () => populateDeviceSelect());
+    navigator.usb.addEventListener('disconnect', (e) => {
+      if (sdrDevice && e.device === sdrDevice) { sdrDevice = null; renderSdrStats(); }
+      populateDeviceSelect();
+    });
+  } else {
+    showUsbNote('WebUSB not supported in this browser — microphone only. (Chrome/Edge/Opera on desktop or Android.)');
+  }
+  populateDeviceSelect();
 
   const sel = $('modSelect');
   MODS.forEach((m, i) => {
@@ -1036,6 +1212,17 @@ window.addEventListener('DOMContentLoaded', () => {
   bindSnrControls();
   $('specFft').addEventListener('click', () => setSpecMode('fft'));
   $('specPsd').addEventListener('click', () => setSpecMode('psd'));
+
+  const vc = $('viewCenter'), vs = $('viewSpan');
+  const applyView = () => {
+    viewCenterHz = +vc.value; viewSpanHz = +vs.value;
+    $('viewCenterLabel').textContent = fmtHz(viewCenterHz);
+    $('viewSpanLabel').textContent = fmtHz(viewSpanHz);
+    if (ctx) drawGuides(); // refresh the static waterfall overlay for the new window
+  };
+  vc.addEventListener('input', applyView);
+  vs.addEventListener('input', applyView);
+  applyView();
 
   $('send').addEventListener('click', () => {
     const text = $('message').value.trim();

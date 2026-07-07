@@ -150,7 +150,21 @@
         <!-- The detection threshold is drawn right on the spectrum (a line floating
              SNR dB above the live noise floor); no separate meter needed. -->
         <canvas id="spectrum" width="600" height="160"></canvas>
+        <!-- "Tuning" knobs: for the mic these just pan/zoom the view, but they're the
+             same center + span an SDR gives you. -->
         <div class="modrow" style="margin-top:10px">
+          <label for="viewCenter">Center</label>
+          <input id="viewCenter" type="range" min="500" max="8000" step="50" value="2500" />
+          <span id="viewCenterLabel" style="min-width:62px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">2.5 kHz</span>
+        </div>
+        <div class="modrow">
+          <label for="viewSpan">Span</label>
+          <input id="viewSpan" type="range" min="500" max="10000" step="100" value="5000" />
+          <span id="viewSpanLabel" style="min-width:62px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">5 kHz</span>
+        </div>
+        <div class="modrow">
           <label for="snrRange2">Threshold</label>
           <input id="snrRange2" type="range" min="3" max="45" step="1" value="10" />
           <span id="snrLabel2" style="min-width:62px;text-align:right;color:var(--accent);
@@ -256,15 +270,25 @@
       </div>
     </section>
 
-    <!-- Device stats. Generic on purpose: a real SDR would populate the same rows
-         from its own API (tuned freq, RF bandwidth, gain). Here it's the phone mic. -->
+    <!-- Device panel: pick the mic or a WebUSB SDR, see its info, test the connection.
+         The rows are generic so a real SDR reports the same shape (freq/bandwidth/gain). -->
     <section id="view-sdr" style="display:none">
       <div class="card">
         <h2>Device</h2>
-        <p class="hint">Stats for the active capture device. Here that's the phone
-           microphone (audio baseband) — a USB SDR would report its tuned frequency,
-           RF bandwidth and gain through this same panel. Some values are read from
-           the device; others are inferred from the sample rate.</p>
+        <p class="hint">Pick the capture device. The mic is always available; an
+           <b>RTL-SDR</b> can be added over <b>WebUSB</b> in Chrome/Edge/Opera on desktop
+           or Android (not iOS/Safari/Firefox). Connecting shows its descriptors;
+           <b>Test</b> proves the browser can claim it. (IQ streaming is the next step.)</p>
+        <div class="modrow">
+          <label for="deviceSel">Source</label>
+          <select id="deviceSel"></select>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <button id="sdrConnect" class="ghost">＋ Connect USB SDR…</button>
+          <button id="sdrTest" class="ghost">Test</button>
+          <button id="sdrForget" class="ghost">Forget</button>
+        </div>
+        <p id="usbNote" class="hint" style="display:none;margin-top:0"></p>
         <div id="sdrStats" class="stats"></div>
         <div class="row" style="margin-top:12px">
           <button id="sdrRefresh" class="ghost">Refresh</button>
