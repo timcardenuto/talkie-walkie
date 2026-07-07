@@ -417,8 +417,9 @@ function stopMic() {
   if (capNode) { capNode.onaudioprocess = null; try { capNode.disconnect(); } catch (_) {} capNode = null; }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; } // releases the mic
   // Drop any half-received message and blank the visuals so it's clearly "off".
-  rxActive = false; setRxLive('');
+  rxActive = false; pendingStart = 0; setRxLive('');
   signalSNR = -Infinity;
+  linkSnrEma = 0; updateSignal(null); // reset the Link meter (decodeStep won't run)
   if (byteData) byteData.fill(0);
   if (freqData) freqData.fill(-100);
 }
@@ -642,6 +643,7 @@ function drawConstellation() {
 /* ---- Receiver ------------------------------------------------------------- */
 let inTone = false, toneStartT = 0, lastValidT = 0, burstFrames = [];
 let rxActive = false, rxSymbols = [], dataIdx = 0, lastRxSymbolT = 0;
+let pendingStart = 0; // timestamp of a START awaiting a data symbol to confirm it's real
 
 // Loudest peak in the detection band this frame, with its SNR over the average.
 function peakInBand() {
@@ -671,6 +673,7 @@ function decodeStep() {
     logMessage('◀ ✗ incomplete', '(signal lost mid-message)', 'corrupt');
     setStatus(listeningStatus());
   }
+  if (pendingStart && (now - pendingStart) > RX_TIMEOUT_MS) pendingStart = 0; // START with no data → drop
 
   if (present) {
     if (!inTone) { inTone = true; toneStartT = now; burstFrames = []; }
@@ -704,18 +707,29 @@ function classifyBurst(frames, idx) {
 }
 
 function commitBurst(frames) {
+  const now = performance.now();
   const sym = classifyBurst(frames, dataIdx);
   if (sym === 'START') {
-    rxActive = true; rxSymbols = []; dataIdx = 0;
+    // A START alone does NOT start a reception. A steady tone at 1500 Hz (coil whine,
+    // hum) classifies as START over and over — so treat it as a *candidate* and reset
+    // the collection buffers, but wait for a valid data symbol to confirm it's real.
+    pendingStart = now;
+    rxSymbols = []; dataIdx = 0;
     if (mod.reset) mod.reset();
-    lastRxSymbolT = performance.now();
-    setStatus('receiving…'); setRxLive('');
   } else if (sym === 'END') {
     if (rxActive) finishMessage();
-  } else if (typeof sym === 'number' && rxActive) {
-    rxSymbols.push(sym); dataIdx++;
-    lastRxSymbolT = performance.now();
-    setRxLive(decodeUtf8(bitsToBytes(symbolsToBits(rxSymbols, mod.bits))));
+    pendingStart = 0;
+  } else if (typeof sym === 'number') {
+    // First valid data symbol close after a START confirms a genuine message.
+    if (!rxActive && pendingStart && (now - pendingStart) <= RX_TIMEOUT_MS) {
+      rxActive = true; pendingStart = 0;
+      setStatus('receiving…'); setRxLive('');
+    }
+    if (rxActive) {
+      rxSymbols.push(sym); dataIdx++;
+      lastRxSymbolT = now;
+      setRxLive(decodeUtf8(bitsToBytes(symbolsToBits(rxSymbols, mod.bits))));
+    }
   }
 }
 
@@ -774,15 +788,20 @@ function transmit(text) {
 }
 
 /* ---- Feedback: link meter + live receive preview -------------------------- */
+let linkSnrEma = 0; // smoothed SNR for the Link meter (instantaneous SNR is jittery)
 function updateSignal(peak) {
   const snr = peak && isFinite(peak.snr) ? peak.snr : 0;
+  // Smooth so the bar/colour don't flicker green↔yellow when the raw SNR jitters
+  // frame-to-frame around the threshold. (Detection still uses the raw value.)
+  linkSnrEma = 0.2 * snr + 0.8 * linkSnrEma;
+  const v = linkSnrEma;
   const bar = $('sigBar');
   // Everything is relative to the threshold so the bar and colour agree: a full bar
   // means "at the level that decodes". Green = would decode, yellow = within 3 dB of
   // it (a near miss), red = clearly below — regardless of where you set the slider.
-  bar.style.width = Math.round(Math.max(0, Math.min(1, snr / SNR_DB)) * 100) + '%';
-  if (snr >= SNR_DB) { bar.style.background = '#5affa0'; $('sigLabel').textContent = 'signal'; }
-  else if (snr >= SNR_DB - 3) { bar.style.background = '#ffd75a'; $('sigLabel').textContent = 'close'; }
+  bar.style.width = Math.round(Math.max(0, Math.min(1, v / SNR_DB)) * 100) + '%';
+  if (v >= SNR_DB) { bar.style.background = '#5affa0'; $('sigLabel').textContent = 'signal'; }
+  else if (v >= SNR_DB - 3) { bar.style.background = '#ffd75a'; $('sigLabel').textContent = 'close'; }
   else { bar.style.background = '#ff8f8f'; $('sigLabel').textContent = 'weak'; }
 }
 function setRxLive(text) {
