@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1020" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <!-- iOS ignores manifest SVG icons for Add-to-Home-Screen; give it a PNG. -->
+  <link rel="apple-touch-icon" href="./icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SoundLab" />
+  <title>DSP SoundLab</title>
+  <style>
+    :root { --bg:#0b1020; --panel:#141b33; --ink:#e7ecff; --muted:#8b96c4;
+            --accent:#5ad1ff; --accent2:#7c8cff; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+           background:var(--bg); color:var(--ink); -webkit-text-size-adjust:100%; }
+    header { padding:14px 16px 8px; }
+    h1 { font-size:18px; margin:0; letter-spacing:.3px; }
+    #status { color:var(--muted); font-size:12px; margin-top:2px; min-height:16px; }
+    nav { display:flex; gap:8px; padding:0 12px 12px; }
+    nav button { flex:1; padding:10px 6px; border:1px solid #26305a; background:var(--panel);
+                 color:var(--muted); border-radius:10px; font-size:13px; }
+    nav button.active { color:var(--ink); border-color:var(--accent2);
+                        box-shadow:0 0 0 1px var(--accent2) inset; }
+    main { padding:0 16px 40px; max-width:640px; margin:0 auto; }
+    .card { background:var(--panel); border:1px solid #26305a; border-radius:14px;
+            padding:16px; margin-bottom:14px; }
+    h2 { font-size:15px; margin:0 0 6px; }
+    p.hint { color:var(--muted); font-size:13px; margin:0 0 12px; line-height:1.45; }
+    canvas { width:100%; height:160px; border-radius:10px; display:block; background:#0b1020; }
+    .readout { font-variant-numeric:tabular-nums; font-size:20px; margin-top:10px; }
+    .readout span { color:var(--accent); }
+    button.primary { background:var(--accent2); color:#fff; border:none; border-radius:10px;
+                     padding:12px 16px; font-size:15px; font-weight:600; }
+    button.ghost { background:transparent; color:var(--ink); border:1px solid #34406e;
+                   border-radius:10px; padding:10px 14px; font-size:14px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    input[type=text] { flex:1; min-width:0; padding:12px; border-radius:10px;
+                       border:1px solid #34406e; background:#0b1020; color:var(--ink); font-size:15px; }
+    input[type=range] { width:100%; }
+    #enable { position:fixed; inset:0; display:flex; flex-direction:column; gap:14px;
+              align-items:center; justify-content:center; background:rgba(11,16,32,.96);
+              z-index:10; text-align:center; padding:24px; }
+    #enable p { color:var(--muted); max-width:300px; font-size:14px; line-height:1.5; }
+    #log .msg { padding:8px 0; border-bottom:1px solid #222c52; font-size:15px; word-break:break-word; }
+    #log .kind { color:var(--muted); font-size:12px; margin-right:6px; }
+    #log .msg.verified .kind { color:#5affa0; }
+    #log .msg.corrupt .kind { color:#ff8f8f; }
+    #hearing { font-size:22px; color:var(--accent); font-variant-numeric:tabular-nums; }
+    .linkrow { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+    .linklabel { font-size:12px; color:var(--muted); width:30px; }
+    .meter { flex:1; height:10px; background:#0b1020; border:1px solid #34406e;
+             border-radius:6px; overflow:hidden; }
+    .meter > div { height:100%; width:0%; background:#ff8f8f;
+                   transition:width .08s linear, background .2s; }
+    #sigLabel { font-size:12px; color:var(--muted); width:92px; text-align:right; }
+    .rxlive { margin-top:12px; min-height:22px; color:var(--accent);
+              font-variant-numeric:tabular-nums; }
+    .modrow { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    .modrow label { font-size:13px; color:var(--muted); }
+    .modrow select { flex:1; padding:10px; border-radius:10px; border:1px solid #34406e;
+                     background:#0b1020; color:var(--ink); font-size:14px; }
+    .wfwrap { position:relative; line-height:0; }
+    .wfwrap canvas { width:100%; border-radius:10px; }
+    #waterfall { background:#0b1020; display:block; }
+    #wfguides { position:absolute; left:0; top:0; pointer-events:none; }
+  </style>
+</head>
+<body>
+  <button id="enable" class="primary">
+    ▶ Enable microphone &amp; audio
+    <p>SoundLab turns your speaker + mic into a modem. Tap to grant mic access,
+       then send a message over sound to another phone.</p>
+    <p id="enableErr" style="color:#ff8f8f;min-height:1em"></p>
+  </button>
+
+  <header>
+    <h1>🔊 DSP SoundLab</h1>
+    <div id="status">tap “Enable” to begin</div>
+  </header>
+
+  <nav>
+    <button id="nav-spectrum" class="active">Spectrum</button>
+    <button id="nav-tones">Tones</button>
+    <button id="nav-messenger">Messenger</button>
+    <button id="nav-constellation">I/Q</button>
+  </nav>
+
+  <main>
+    <!-- Lesson 1: see sound as frequency -->
+    <section id="view-spectrum">
+      <div class="card">
+        <h2>1 · See sound</h2>
+        <p class="hint">This is a live FFT of your microphone. Whistle, hum, or play
+           a note — every sound is a pattern of frequencies. The shaded band is where
+           our data tones live (1.4–3.6 kHz).</p>
+        <canvas id="spectrum" width="600" height="160"></canvas>
+        <div class="readout">now hearing: <span id="hearing">—</span></div>
+      </div>
+
+      <div class="card">
+        <h2>Waterfall</h2>
+        <p class="hint">Frequency across, time flowing down. Send a message from the
+           Messenger tab and watch the tones scroll by as bright streaks between the
+           START and END guide lines.</p>
+        <div class="wfwrap">
+          <canvas id="waterfall" width="600" height="220"></canvas>
+          <canvas id="wfguides" width="600" height="220"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Lesson 2: hear the building blocks -->
+    <section id="view-tones" style="display:none">
+      <div class="card">
+        <h2>2 · Hear the tones</h2>
+        <p class="hint">Frequency shift keying = sending data by switching between
+           tones. Play the two markers and drag the slider to hear the alphabet the
+           modem uses. Watch these show up on the Spectrum tab.</p>
+        <div class="readout" style="margin-bottom:10px"><span id="toneReadout">1200 Hz</span></div>
+        <input id="toneFreq" type="range" min="200" max="4000" step="10" value="1200" />
+        <div class="row" style="margin-top:12px">
+          <button id="tonePlay" class="primary">▶ Play</button>
+          <button id="toneStop" class="ghost">■ Stop</button>
+          <button id="toneMark" class="ghost">START tone</button>
+          <button id="toneSpace" class="ghost">data tone</button>
+          <button id="toneSweep" class="ghost">▶ sweep all 18</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Lesson 3: the payoff — two phones talking -->
+    <section id="view-messenger" style="display:none">
+      <div class="card">
+        <h2>3 · Send a message over sound</h2>
+        <p class="hint">Type something and hit Send — it plays as tones. Point a second
+           phone (also on this page, mic enabled) nearby and watch it decode. Same
+           device also hears itself, so you can test solo first.</p>
+        <div class="modrow">
+          <label for="modSelect">Modulation</label>
+          <select id="modSelect"></select>
+        </div>
+        <p class="hint" style="margin:-6px 0 12px">Both phones must pick the <b>same</b>
+           modulation. FSK &amp; FHSS are the robust ones; ASK is fragile on purpose;
+           Chirp is experimental.</p>
+        <div class="linkrow">
+          <span class="linklabel">Link</span>
+          <div class="meter"><div id="sigBar"></div></div>
+          <span id="sigLabel">quiet</span>
+        </div>
+        <div class="row">
+          <input id="message" type="text" placeholder="hello over sound" maxlength="64" />
+          <button id="send" class="primary">Send ▶</button>
+        </div>
+        <div id="rxLive" class="rxlive"></div>
+      </div>
+      <div class="card">
+        <h2>Messages</h2>
+        <div id="log"></div>
+      </div>
+    </section>
+
+    <!-- Constellation (I/Q) view, meaningful when DBPSK is selected -->
+    <section id="view-constellation" style="display:none">
+      <div class="card">
+        <h2>Constellation (I/Q)</h2>
+        <p class="hint">Select <b>DBPSK</b> in Messenger and send a message. Each symbol's
+           phase change plots here: a point near <b>bit 0</b> (right) means "same phase as
+           last symbol", near <b>bit 1</b> (left) means "flipped". Tight clusters = clean
+           link; a smeared ring = the room scrambling the phase. Best solo/loopback.</p>
+        <div class="wfwrap">
+          <canvas id="constellation" width="600" height="300"></canvas>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
