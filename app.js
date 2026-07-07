@@ -330,7 +330,6 @@ let micMuted = false; // RX kill switch: when true the mic is fully released (se
 let bandLoBin = 0, bandHiBin = 0;
 let running = false;
 let wfRow = null;          // reusable 1-pixel-tall ImageData for the waterfall
-let signalSNR = -Infinity; // loudest in-band peak above the noise floor, in dB
 let specMode = 'fft';      // 'fft' = instantaneous magnitude bars; 'psd' = averaged trace
 let psdFloat = null, psdAvg = null; // scratch + running power average for the PSD view
 const PSD_ALPHA = 0.15;    // Welch-ish EMA weight per frame (lower = smoother/slower)
@@ -418,7 +417,6 @@ function stopMic() {
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; } // releases the mic
   // Drop any half-received message and blank the visuals so it's clearly "off".
   rxActive = false; pendingStart = 0; setRxLive('');
-  signalSNR = -Infinity;
   linkSnrEma = 0; updateSignal(null); // reset the Link meter (decodeStep won't run)
   if (byteData) byteData.fill(0);
   if (freqData) freqData.fill(-100);
@@ -429,7 +427,7 @@ function loop() {
   if (!running) return;
   drawSpectrum();   // refreshes byteData + draws the instantaneous bars
   drawWaterfall();  // reuses byteData for its new row
-  if (!micMuted) decodeStep(); // mic released → nothing to decode (updates signalSNR)
+  if (!micMuted) decodeStep(); // mic released → nothing to decode
   drawConstellation();
   requestAnimationFrame(loop);
 }
@@ -483,8 +481,12 @@ function drawThreshold(g, W, H, maxBin) {
 
   // In-band noise floor = mean level across the detection band (byteData is a linear
   // map of FLOOR..CEIL dB, so averaging the bytes ≈ the mean dB the detector uses).
-  let sum = 0, n = 0;
-  for (let b = bandLoBin; b <= bandHiBin && b < byteData.length; b++) { sum += byteData[b]; n++; }
+  // Track the loudest bin in the same pass for the peak marker.
+  let sum = 0, n = 0, peakBin = -1, peakVal = -1;
+  for (let b = bandLoBin; b <= bandHiBin && b < byteData.length; b++) {
+    sum += byteData[b]; n++;
+    if (byteData[b] > peakVal) { peakVal = byteData[b]; peakBin = b; }
+  }
   const noiseDb = FLOOR + (n ? sum / n : 0) / 255 * (CEIL - FLOOR);
   const yN = yOf(noiseDb), yT = yOf(noiseDb + SNR_DB);
 
@@ -512,6 +514,19 @@ function drawThreshold(g, W, H, maxBin) {
   g.fillText('detect ▸ noise + ' + SNR_DB + ' dB', xHi - 2, Math.max(yT - 3, 10));
   g.fillStyle = 'rgba(139,150,196,0.9)';
   g.fillText('noise', xHi - 2, Math.min(yN + 12, H - 15));
+
+  // Peak marker: the loudest in-band bin — green if it clears the threshold (would
+  // register), yellow if not. This is the peak "now hearing" reports.
+  if (peakBin >= 0 && peakVal > 0) {
+    const peakDb = FLOOR + peakVal / 255 * (CEIL - FLOOR);
+    const above = (peakDb - noiseDb) >= SNR_DB;
+    const px = (peakBin / maxBin) * W, py = yOf(peakDb);
+    g.fillStyle = above ? '#5affa0' : '#ffd75a';
+    g.beginPath(); g.arc(px, py, 3.5, 0, 2 * Math.PI); g.fill();
+    g.textAlign = 'center';
+    const hz = Math.round((peakBin * ctx.sampleRate) / analyser.fftSize);
+    g.fillText(hz + ' Hz', px, Math.max(py - 7, 8));
+  }
   g.restore();
 }
 
@@ -612,6 +627,13 @@ function drawGuides() {
     g.fillStyle = 'rgba(200,210,255,0.75)'; g.font = '10px system-ui,sans-serif';
     g.fillText(label, x + 3, 12);
   }
+  // kHz scale along the bottom, matching the spectrum's x-axis (0–5 kHz span).
+  g.font = '9px system-ui,sans-serif'; g.textAlign = 'center';
+  g.fillStyle = 'rgba(139,150,196,0.9)';
+  for (let f = 1000; f <= 4000; f += 1000) {
+    g.fillText((f / 1000) + 'k', (freqToBin(f) / maxBin) * W, H - 3);
+  }
+  g.textAlign = 'left';
 }
 
 /* ---- Constellation view (for DBPSK) --------------------------------------- */
@@ -664,7 +686,6 @@ function decodeStep() {
   // threshold. Use that same test for "now hearing", so the readout previews what
   // would actually register — not a faint peak that merely beats a very quiet band.
   const present = !!(peak && peak.peakDb >= ABS_FLOOR && peak.snr >= SNR_DB);
-  signalSNR = peak ? peak.snr : -Infinity;
   updateSignal(peak);
   $('hearing').textContent = present ? Math.round(peak.freq) + ' Hz' : '—';
 
