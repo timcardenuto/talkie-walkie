@@ -41,6 +41,9 @@
     h2 { font-size:15px; margin:0 0 6px; }
     p.hint { color:var(--muted); font-size:13px; margin:0 0 12px; line-height:1.45; }
     canvas { width:100%; height:160px; border-radius:10px; display:block; background:#0b1020; }
+    .specrow { display:flex; gap:8px; align-items:stretch; }
+    .specrow #spectrum { flex:1 1 auto; width:auto; min-width:0; }
+    .specrow #snrMeter { flex:0 0 54px; width:54px; }
     .readout { font-variant-numeric:tabular-nums; font-size:20px; margin-top:10px; }
     .readout span { color:var(--accent); }
     button.primary { background:var(--accent2); color:#fff; border:none; border-radius:10px;
@@ -116,7 +119,18 @@
         <p class="hint">This is a live FFT of your microphone. Whistle, hum, or play
            a note — every sound is a pattern of frequencies. The shaded band is where
            our data tones live (1.4–3.6 kHz).</p>
-        <canvas id="spectrum" width="600" height="160"></canvas>
+        <div class="specrow">
+          <canvas id="spectrum" width="600" height="160"></canvas>
+          <!-- Live in-band SNR with the detection threshold line, so you can see
+               where the threshold sits relative to the actual signal/noise. -->
+          <canvas id="snrMeter" width="60" height="160"></canvas>
+        </div>
+        <div class="modrow" style="margin-top:10px">
+          <label for="snrRange2">Threshold</label>
+          <input id="snrRange2" type="range" min="3" max="25" step="1" value="10" />
+          <span id="snrLabel2" style="min-width:62px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">≥ 10 dB</span>
+        </div>
         <div class="readout">now hearing: <span id="hearing">—</span></div>
       </div>
 
@@ -173,7 +187,8 @@
         <div class="modrow">
           <label for="snrRange">Sensitivity</label>
           <input id="snrRange" type="range" min="3" max="25" step="1" value="10" />
-          <span id="snrLabel" class="linklabel" style="width:70px;text-align:right">SNR ≥ 10 dB</span>
+          <span id="snrLabel" style="min-width:62px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">≥ 10 dB</span>
         </div>
         <p class="hint" style="margin:-4px 0 12px">Lower = more sensitive (catches faint
            signals, but noise may false-trigger “receiving…”). Higher = stricter.</p>

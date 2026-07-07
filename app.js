@@ -405,6 +405,7 @@ function stopMic() {
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; } // releases the mic
   // Drop any half-received message and blank the visuals so it's clearly "off".
   rxActive = false; setRxLive('');
+  signalSNR = -Infinity;
   if (byteData) byteData.fill(0);
   if (freqData) freqData.fill(-100);
 }
@@ -414,9 +415,38 @@ function loop() {
   if (!running) return;
   drawSpectrum();   // refreshes byteData + draws the instantaneous bars
   drawWaterfall();  // reuses byteData for its new row
-  if (!micMuted) decodeStep(); // mic released → nothing to decode
+  if (!micMuted) decodeStep(); // mic released → nothing to decode (updates signalSNR)
+  drawSnrMeter();   // live in-band SNR vs the threshold
   drawConstellation();
   requestAnimationFrame(loop);
+}
+
+/* ---- SNR meter: live in-band SNR next to the FFT, with the threshold line ---
+ * signalSNR (set by decodeStep) is the loudest in-band peak above the noise floor.
+ * The red line marks SNR_DB — a burst only registers when the bar clears it. */
+function drawSnrMeter() {
+  const cv = $('snrMeter'); if (!cv) return;
+  const g = cv.getContext('2d');
+  const W = cv.width, H = cv.height, MAXDB = 30, top = 13, bot = H - 13;
+  const yOf = (db) => bot - Math.max(0, Math.min(MAXDB, db)) / MAXDB * (bot - top);
+
+  g.fillStyle = '#0b1020'; g.fillRect(0, 0, W, H);
+
+  const snr = isFinite(signalSNR) ? signalSNR : 0;
+  const above = snr >= SNR_DB;
+  const barW = W * 0.5, bx = (W - barW) / 2, yb = yOf(snr);
+  g.fillStyle = above ? '#5affa0' : '#5ad1ff';
+  g.fillRect(bx, yb, barW, bot - yb);
+
+  const yt = yOf(SNR_DB);                     // threshold line (moves with the slider)
+  g.strokeStyle = '#ff8f8f'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(2, yt); g.lineTo(W - 2, yt); g.stroke();
+
+  g.textAlign = 'center'; g.font = '10px system-ui,sans-serif';
+  g.fillStyle = 'rgba(200,210,255,0.7)'; g.fillText('SNR', W / 2, 10);
+  g.fillStyle = '#ff8f8f'; g.fillText('▸' + SNR_DB, W / 2, Math.min(Math.max(yt - 4, 22), bot - 2));
+  g.fillStyle = above ? '#5affa0' : '#8b96c4';
+  g.fillText(Math.round(Math.max(0, snr)) + '', W / 2, H - 3);
 }
 
 /* ---- Instantaneous spectrum ----------------------------------------------- */
@@ -713,6 +743,20 @@ function listeningStatus() {
   return 'listening · ' + mod.name + (ctx ? ' · ' + ctx.sampleRate + ' Hz' : '');
 }
 
+// One threshold (SNR_DB), two sliders (Spectrum + Messenger). Dragging either moves
+// the other and the meter's threshold line — so you can adjust wherever you're looking.
+function bindSnrControls() {
+  const ranges = ['snrRange', 'snrRange2'].map($).filter(Boolean);
+  const labels = ['snrLabel', 'snrLabel2'].map($).filter(Boolean);
+  const apply = (v) => {
+    SNR_DB = v;
+    ranges.forEach((r) => { r.value = v; });
+    labels.forEach((l) => { l.textContent = '≥ ' + v + ' dB'; });
+  };
+  ranges.forEach((r) => r.addEventListener('input', () => apply(+r.value)));
+  apply(SNR_DB); // sync both to the real default on load
+}
+
 /* ---- Receive-only mute (app-level TX kill switch) ------------------------- */
 // There is no OS/browser "speaker permission", so this is how a phone guarantees it
 // stays receive-only: block every transmit path and grey out the controls.
@@ -776,11 +820,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (ctx) { drawGuides(); setStatus('modulation: ' + mod.name); }
   });
 
-  const snrRange = $('snrRange'), snrLabel = $('snrLabel');
-  snrRange.addEventListener('input', () => {
-    SNR_DB = +snrRange.value;
-    snrLabel.textContent = 'SNR ≥ ' + SNR_DB + ' dB';
-  });
+  bindSnrControls();
 
   $('send').addEventListener('click', () => {
     const text = $('message').value.trim();
