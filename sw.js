@@ -1,10 +1,9 @@
 /* Offline cache so SoundLab installs as a PWA and works with no network.
  *
  * Update strategy:
- *   - HTML shell + version.js: network-first, so a fresh deploy shows on the next
- *     load (not a load later); cache is only the offline fallback.
- *   - Everything else (app.js, icons, manifest): stale-while-revalidate — instant
- *     from cache, refreshed in the background.
+ *   - App shell (HTML document + all .js): network-first, so a fresh deploy shows on
+ *     the next load and markup never desyncs from its scripts; cache is offline only.
+ *   - Icons / manifest: stale-while-revalidate — instant from cache, refreshed in bg.
  * The cache name is keyed to the deployed version, so each deploy wipes old entries. */
 // Key the cache to the deployed version, so every push lands in a fresh cache and
 // old entries are dropped on activate. version.js is fetched fresh during SW update,
@@ -72,7 +71,10 @@ self.addEventListener('fetch', (e) => {
   // Only handle same-origin GETs; let everything else hit the network normally.
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
 
-  const isNav = req.mode === 'navigate';                       // the HTML document
-  const isVersion = new URL(req.url).pathname.endsWith('/version.js');
-  e.respondWith(isNav || isVersion ? networkFirst(req) : staleWhileRevalidate(req));
+  // The app shell — the HTML document and ALL scripts — is network-first so the
+  // markup and its JS can never come from different deploys (that desync made new
+  // buttons appear with stale handlers). Images/manifest stay stale-while-revalidate.
+  const path = new URL(req.url).pathname;
+  const isShell = req.mode === 'navigate' || path.endsWith('.js');
+  e.respondWith(isShell ? networkFirst(req) : staleWhileRevalidate(req));
 });

@@ -901,6 +901,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('toneStop').addEventListener('click', stopTone);
   $('toneMark').addEventListener('click', () => { if (ctx) startTone(F_START); });
   $('toneSpace').addEventListener('click', () => { if (ctx) startTone(2500); });
+  $('toneEnd').addEventListener('click', () => { if (ctx) startTone(F_END); });
   $('toneSweep').addEventListener('click', sweepTones);
 
   showView('spectrum');

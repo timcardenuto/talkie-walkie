@@ -44,6 +44,68 @@ a new scheme by dropping another object into the `MODS` array.
 All timing and thresholds are tunable at the top of `app.js` (`SYMBOL_MS`,
 `GAP_MS`, `TOLERANCE`, `SNR_DB`, …).
 
+## Wire format (the protocol)
+
+This is the "contract" both phones must agree on. All values are the constants at
+the top of `app.js` — they are **not** user-adjustable at runtime (except the
+receiver's SNR threshold, which is a local decision and doesn't affect the format).
+Two phones interoperate only if these match.
+
+### Frequency plan
+
+| Element        | Frequency        | Notes |
+|----------------|------------------|-------|
+| START marker   | **1500 Hz**      | announces the start of a frame (`F_START`) |
+| END marker     | **3500 Hz**      | ends the frame (`F_END`) |
+| Data band      | **1700–3300 Hz** | where payload tones live (`DATA_LO`…`DATA_HI`) |
+| Detection band | **1350–3650 Hz** | receiver only looks here (`BAND_LO`…`BAND_HI`) |
+
+### Timing (self-clocking)
+
+Every symbol — markers included — is a **120 ms tone burst** (`SYMBOL_MS`) followed
+by a **60 ms silence** (`GAP_MS`). There is no shared clock: the receiver detects
+bursts separated by silence, so timing drift between phones doesn't matter.
+
+### Frame structure
+
+```
+[START] [data symbol]…[data symbol] [END]
+         └── payload bytes + 1 checksum byte, packed to symbols ──┘
+```
+
+1. **Payload** = the message text as **UTF-8** bytes.
+2. **Checksum** = one byte = `(sum of all payload bytes) mod 256`, appended after
+   the payload. The receiver pops the last byte, recomputes the sum over the rest,
+   and flags the message **✓ verified** or **✗ corrupt**.
+3. **Bit packing** = each byte → 8 bits **MSB-first**; the bit stream is then chopped
+   into symbols of `k` bits (`k` = bits/symbol for the chosen modulation), again
+   MSB-first. A final partial symbol is zero-padded; trailing sub-byte bits are
+   dropped on decode.
+
+### Symbol → tone mapping (per modulation)
+
+All modulations share the framing above and differ only in how one data symbol of
+`k` bits is rendered/decoded:
+
+| Modulation   | k | Symbol rendering |
+|--------------|---|------------------|
+| **M-FSK** (M=2/4/8/16) | 1/2/3/4 | symbol value *v* → tone `1700 + v·(1600/(M−1))` Hz (M tones evenly spanning the data band) |
+| **OOK/ASK**  | 1 | carrier **2000 Hz** at amplitude 0.16 (bit 0) or 0.36 (bit 1); RX decides by SNR ≥ 19 dB |
+| **Chirp/CSS**| 1 | up-sweep 1700→3300 Hz = 0, down-sweep 3300→1700 Hz = 1; decoded by quadrature matched filter |
+| **FHSS**     | 2 | 4-FSK block whose base hops over `[1700,2100,2500,2900]` on a fixed 16-entry PN schedule indexed by data-symbol position; tone = `base + v·100` Hz |
+| **DBPSK**    | 1 | carrier **2000 Hz**; bit = phase **change** (1) vs **same** (0) from the previous symbol, with a leading reference symbol; rendered phase-continuous |
+
+### Receiver rules
+
+- A burst "counts" when the loudest peak in the detection band is at least
+  `ABS_FLOOR` (−80 dBFS-ish) **and** clears the SNR threshold (`SNR_DB`, default
+  10 dB, adjustable live).
+- A burst must last ≥ `MIN_TONE_MS` (45 ms); ≥ `MIN_GAP_MS` (30 ms) of silence ends
+  the current symbol.
+- A burst is a **marker** if its median frequency is within `TOLERANCE` (±45 Hz) of
+  1500/3500 Hz; otherwise it's handed to the modulation's decoder.
+- A partially-received frame is abandoned after `RX_TIMEOUT_MS` (2500 ms) of silence.
+
 ## Running it
 
 The microphone requires a **secure context**:
