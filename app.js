@@ -338,6 +338,16 @@ const PSD_ALPHA = 0.15;    // Welch-ish EMA weight per frame (lower = smoother/s
 // recomputed each frame by updateView().
 let viewCenterHz = 2500, viewSpanHz = 5000;
 let vLo = 0, vHi = 5000, vLoBin = 0, vHiBin = 1;
+// SDR (WebUSB / synthetic IQ) display mode. When sdrActive, the spectrum/waterfall
+// are fed by a complex FFT of IQ instead of the mic's AnalyserNode, and freqToBin/
+// binToFreq map an fftshifted window centered on the tuned RF frequency.
+let sdrActive = false, sdrCenterHz = 100e6, sdrRate = 2_400_000, sdrGainDb = 30;
+const SDR_FFT = 2048, SDR_FLOOR = -80, SDR_CEIL = 0;
+// Real RTL-SDR streaming (via the rtlsdrjs WebUSB driver, loaded on demand).
+let sdrSourceKind = 'synthetic'; // 'synthetic' | 'rtlsdr'
+let rtl = null, rtlReading = false, latestIq = null;
+const RTLSDR_MODULE_URL = 'https://esm.sh/rtlsdrjs'; // RTL2832U driver (CDN; can vendor locally)
+const RTL_READ = SDR_FFT * 32;   // complex samples per USB read (paces to the data rate)
 let capBuf = null, capPos = 0, capTotal = 0; // ring buffer + absolute sample clock
 let constPoints = [];      // recent DBPSK phasors for the constellation view
 let dbpskPrev = null;      // previous DBPSK symbol phase (for differential decode)
@@ -345,8 +355,18 @@ let dbpskPrev = null;      // previous DBPSK symbol phase (for differential deco
 /* ---- Helpers -------------------------------------------------------------- */
 const $ = (id) => document.getElementById(id);
 const setStatus = (t) => { $('status').textContent = t; };
-function binToFreq(b) { return (b * ctx.sampleRate) / analyser.fftSize; }
-function freqToBin(f) { return Math.round((f * analyser.fftSize) / ctx.sampleRate); }
+// Bin <-> absolute Hz. In SDR mode the spectrum is an fftshifted IQ window spanning
+// [center - rate/2, center + rate/2]; otherwise it's the mic's 0..Nyquist real FFT.
+function binToFreq(b) {
+  return sdrActive ? (sdrCenterHz - sdrRate / 2) + b * sdrRate / SDR_FFT
+                   : (b * ctx.sampleRate) / analyser.fftSize;
+}
+function freqToBin(f) {
+  return Math.round(sdrActive ? (f - (sdrCenterHz - sdrRate / 2)) / sdrRate * SDR_FFT
+                              : (f * analyser.fftSize) / ctx.sampleRate);
+}
+const specFloor = () => sdrActive ? SDR_FLOOR : analyser.minDecibels;
+const specCeil = () => sdrActive ? SDR_CEIL : analyser.maxDecibels;
 
 /* ---- Startup (needs a user gesture on mobile) ----------------------------- */
 async function enable() {
@@ -438,7 +458,7 @@ function loop() {
   updateView();     // resolve the center/span knobs for this frame
   drawSpectrum();   // refreshes byteData + draws the instantaneous bars
   drawWaterfall();  // reuses byteData for its new row
-  if (!micMuted) decodeStep(); // mic released → nothing to decode
+  if (!micMuted && !sdrActive) decodeStep(); // mic released or SDR active → no decode
   drawConstellation();
   requestAnimationFrame(loop);
 }
@@ -446,11 +466,17 @@ function loop() {
 /* ---- Display window (tuning) --------------------------------------------- */
 // Resolve center/span into a pixel-mappable window, clamped to [0, Nyquist].
 function updateView() {
-  const nyq = ctx ? ctx.sampleRate / 2 : 24000;
-  vLo = Math.max(0, viewCenterHz - viewSpanHz / 2);
-  vHi = Math.min(nyq, viewCenterHz + viewSpanHz / 2);
-  if (vHi <= vLo + 50) vHi = vLo + 50;
-  const maxIdx = (analyser ? analyser.frequencyBinCount : 2048) - 1;
+  if (sdrActive) {
+    // The tuner fully defines the window: center ± rate/2 (the captured band).
+    vLo = sdrCenterHz - sdrRate / 2;
+    vHi = sdrCenterHz + sdrRate / 2;
+  } else {
+    const nyq = ctx ? ctx.sampleRate / 2 : 24000;
+    vLo = Math.max(0, viewCenterHz - viewSpanHz / 2);
+    vHi = Math.min(nyq, viewCenterHz + viewSpanHz / 2);
+    if (vHi <= vLo + 50) vHi = vLo + 50;
+  }
+  const maxIdx = (byteData ? byteData.length : SDR_FFT) - 1;
   vLoBin = Math.max(0, Math.min(maxIdx, freqToBin(vLo)));
   vHiBin = Math.max(vLoBin + 1, Math.min(maxIdx, freqToBin(vHi)));
 }
@@ -460,22 +486,29 @@ function niceStep(raw) {
   const p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
   return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * p;
 }
-const fmtAxis = (hz) => hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? 1 : 0) + 'k' : Math.round(hz) + '';
+const fmtAxis = (hz) =>
+  hz >= 1e6 ? (hz / 1e6).toFixed(hz % 1e6 ? 2 : 0) + 'M'
+  : hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? 1 : 0) + 'k'
+  : Math.round(hz) + '';
 
 /* ---- Spectrum: FFT bars or averaged PSD trace ----------------------------- */
 function drawSpectrum() {
   const cv = $('spectrum'), g = cv.getContext('2d');
   const W = cv.width, H = cv.height;
-  analyser.getByteFrequencyData(byteData); // always refresh — the waterfall reuses it
+  if (sdrActive) fillIqSpectrum();               // IQ complex FFT → byteData + psdFloat
+  else analyser.getByteFrequencyData(byteData);  // mic real FFT (waterfall reuses byteData)
   g.fillStyle = '#0b1020'; g.fillRect(0, 0, W, H);
-  // Shaded detection band, clipped to the current view.
-  const bx = Math.max(0, xHz(BAND_LO, W)), bx2 = Math.min(W, xHz(BAND_HI, W));
-  if (bx2 > bx) { g.fillStyle = 'rgba(90,140,255,0.12)'; g.fillRect(bx, 0, bx2 - bx, H); }
+  // Shaded detection band (mic modem only), clipped to the current view.
+  if (!sdrActive) {
+    const bx = Math.max(0, xHz(BAND_LO, W)), bx2 = Math.min(W, xHz(BAND_HI, W));
+    if (bx2 > bx) { g.fillStyle = 'rgba(90,140,255,0.12)'; g.fillRect(bx, 0, bx2 - bx, H); }
+  }
 
   if (specMode === 'psd') drawPsd(g, W, H);
   else drawFftBars(g, W, H);
 
-  drawThreshold(g, W, H); // detection line floating above the live noise floor
+  if (sdrActive) drawSdrPeak(g, W, H); // simple RF peak marker (no modem threshold)
+  else drawThreshold(g, W, H);         // detection line above the live noise floor
   drawFreqAxis(g, W, H);
 }
 
@@ -490,6 +523,7 @@ function drawFreqAxis(g, W, H) {
     g.fillStyle = 'rgba(139,150,196,0.9)';
     g.fillText(fmtAxis(f), x, H - 2);
   }
+  if (sdrActive) return; // START/END markers are a mic-modem concept
   for (const [f, label] of [[F_START, 'START'], [F_END, 'END']]) {
     const x = xHz(f, W);
     if (x < 0 || x > W) continue;
@@ -576,16 +610,17 @@ function drawFftBars(g, W, H) {
 // Power spectral density: exponentially time-average the power (Welch-style), then
 // draw a smooth filled trace with a dB grid — the calmer spectrum-analyzer look.
 function drawPsd(g, W, H) {
-  const n = analyser.frequencyBinCount;
+  // SDR mode already filled psdFloat (in fillIqSpectrum); mic mode reads the analyser.
+  const n = sdrActive ? SDR_FFT : analyser.frequencyBinCount;
   if (!psdFloat || psdFloat.length !== n) { psdFloat = new Float32Array(n); psdAvg = null; }
-  analyser.getFloatFrequencyData(psdFloat); // magnitude in dB (10·log10 power)
+  if (!sdrActive) analyser.getFloatFrequencyData(psdFloat); // magnitude in dB
   if (!psdAvg) { psdAvg = new Float32Array(n); for (let i = 0; i < n; i++) psdAvg[i] = 1e-10; }
   for (let b = 0; b < n; b++) {   // average all bins so panning doesn't reset history
     const lin = Math.pow(10, psdFloat[b] / 10);          // dB -> linear power
     psdAvg[b] = PSD_ALPHA * lin + (1 - PSD_ALPHA) * psdAvg[b]; // average in power domain
   }
 
-  const FLOOR = analyser.minDecibels, CEIL = analyser.maxDecibels; // -100 .. -10
+  const FLOOR = specFloor(), CEIL = specCeil();
   const yOf = (db) => H * (1 - (Math.max(FLOOR, Math.min(CEIL, db)) - FLOOR) / (CEIL - FLOOR));
 
   // dB grid + labels.
@@ -643,21 +678,23 @@ function drawGuides() {
   const W = cv.width, H = cv.height;
   updateView(); // called outside the render loop (on enable / mod / tuning change)
   g.clearRect(0, 0, W, H);
-  for (const f of mod.guides()) {
-    const x = xHz(f, W);
-    if (x < 0 || x > W) continue;
-    g.strokeStyle = 'rgba(255,255,255,0.12)';
-    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+  if (!sdrActive) { // modem tone guides + START/END markers are mic-only
+    for (const f of mod.guides()) {
+      const x = xHz(f, W);
+      if (x < 0 || x > W) continue;
+      g.strokeStyle = 'rgba(255,255,255,0.12)';
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+    }
+    for (const [f, label] of [[F_START, 'START'], [F_END, 'END']]) {
+      const x = xHz(f, W);
+      if (x < 0 || x > W) continue;
+      g.strokeStyle = 'rgba(124,140,255,0.55)';
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+      g.fillStyle = 'rgba(200,210,255,0.75)'; g.font = '10px system-ui,sans-serif';
+      g.fillText(label, x + 3, 12);
+    }
   }
-  for (const [f, label] of [[F_START, 'START'], [F_END, 'END']]) {
-    const x = xHz(f, W);
-    if (x < 0 || x > W) continue;
-    g.strokeStyle = 'rgba(124,140,255,0.55)';
-    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
-    g.fillStyle = 'rgba(200,210,255,0.75)'; g.font = '10px system-ui,sans-serif';
-    g.fillText(label, x + 3, 12);
-  }
-  // kHz scale along the bottom, matching the spectrum's x-axis.
+  // frequency scale along the bottom, matching the spectrum's x-axis.
   const step = niceStep((vHi - vLo) / 5);
   g.font = '9px system-ui,sans-serif'; g.textAlign = 'center';
   g.fillStyle = 'rgba(139,150,196,0.9)';
@@ -666,6 +703,107 @@ function drawGuides() {
     if (x >= 0 && x <= W) g.fillText(fmtAxis(f), x, H - 3);
   }
   g.textAlign = 'left';
+}
+
+/* ==== SDR IQ engine (synthetic now; real RTL-SDR over WebUSB later) =========
+ * Feeds the same byteData/psdFloat the draw code already consumes, so PSD, waterfall,
+ * peak marker, tuning, etc. are all reused. genIqBlock() is the only piece a real
+ * RTL-SDR replaces: swap synthesized IQ for bulk-transfer samples. */
+function makeFft(N) {
+  const rev = new Int32Array(N), bits = Math.round(Math.log2(N));
+  for (let i = 0; i < N; i++) { let r = 0, v = i; for (let b = 0; b < bits; b++) { r = (r << 1) | (v & 1); v >>= 1; } rev[i] = r; }
+  const cos = new Float32Array(N / 2), sin = new Float32Array(N / 2);
+  for (let k = 0; k < N / 2; k++) { cos[k] = Math.cos(-2 * Math.PI * k / N); sin[k] = Math.sin(-2 * Math.PI * k / N); }
+  return function forward(re, im) {
+    for (let i = 0; i < N; i++) { const j = rev[i]; if (j > i) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let half = 1; half < N; half *= 2) {
+      const step = N / (half * 2);
+      for (let i = 0; i < N; i += half * 2) {
+        for (let k = 0, t = 0; k < half; k++, t += step) {
+          const c = cos[t], s = sin[t], a = i + k, b = a + half;
+          const tr = c * re[b] - s * im[b], ti = c * im[b] + s * re[b];
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        }
+      }
+    }
+  };
+}
+const gauss = () => { let u = 0, v = 0; while (u === 0) u = Math.random(); while (v === 0) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+let iqRe = null, iqIm = null, iqWin = null, iqWinSum = 1, iqFft = null;
+let synthPhase = [], synthDrift = 0;
+// A fake RF "band" of stations at absolute frequencies (Hz). Tuning moves them across
+// the display; only those within ±rate/2 of center appear. One slowly wanders.
+const synthStations = [
+  { hz: 99.1e6, a: 0.5, drift: true }, { hz: 99.7e6, a: 0.8 },
+  { hz: 100.3e6, a: 0.55 }, { hz: 100.9e6, a: 0.4 }, { hz: 101.5e6, a: 0.65 },
+];
+
+function genIqBlock(re, im) {
+  const N = SDR_FFT, fs = sdrRate, gain = Math.pow(10, (sdrGainDb - 30) / 20);
+  if (synthPhase.length !== synthStations.length) synthPhase = new Array(synthStations.length).fill(0);
+  synthDrift += 0.02;
+  for (let s = 0; s < synthStations.length; s++) {
+    const st = synthStations[s];
+    const off = st.hz + (st.drift ? Math.sin(synthDrift) * 300000 : 0) - sdrCenterHz;
+    st._off = off; st._inc = 2 * Math.PI * off / fs;
+  }
+  for (let n = 0; n < N; n++) {
+    let sr = 0, si = 0;
+    for (let s = 0; s < synthStations.length; s++) {
+      const st = synthStations[s];
+      if (Math.abs(st._off) < fs / 2) {
+        sr += st.a * Math.cos(synthPhase[s]); si += st.a * Math.sin(synthPhase[s]);
+        synthPhase[s] += st._inc;
+      }
+    }
+    sr += gauss() * 0.01; si += gauss() * 0.01;     // complex noise floor
+    re[n] = sr * gain; im[n] = si * gain;
+  }
+}
+
+// Complex FFT of the latest IQ block → byteData + psdFloat, fftshifted so the tuned
+// center frequency sits in the middle of the display.
+function fillIqSpectrum() {
+  const N = SDR_FFT;
+  if (!iqFft) {
+    iqRe = new Float32Array(N); iqIm = new Float32Array(N); iqFft = makeFft(N);
+    iqWin = new Float32Array(N); let s = 0;
+    for (let i = 0; i < N; i++) { iqWin[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1))); s += iqWin[i]; }
+    iqWinSum = s;
+  }
+  if (!byteData || byteData.length < N) byteData = new Uint8Array(N);
+  if (!psdFloat || psdFloat.length !== N) { psdFloat = new Float32Array(N); psdAvg = null; }
+  if (sdrSourceKind === 'rtlsdr') {
+    const src = latestIq; // last hardware block (interleaved I/Q floats)
+    if (src) for (let i = 0; i < N; i++) { iqRe[i] = src[2 * i]; iqIm[i] = src[2 * i + 1]; }
+    else { iqRe.fill(0); iqIm.fill(0); }
+  } else {
+    genIqBlock(iqRe, iqIm); // synthetic demo
+  }
+  for (let i = 0; i < N; i++) { iqRe[i] *= iqWin[i]; iqIm[i] *= iqWin[i]; }
+  iqFft(iqRe, iqIm);
+  const half = N / 2;
+  for (let k = 0; k < N; k++) {
+    const mag = Math.hypot(iqRe[k], iqIm[k]) / iqWinSum;
+    const db = 20 * Math.log10(mag + 1e-9);
+    const disp = (k + half) % N; // fftshift: DC (center) to the middle
+    psdFloat[disp] = db;
+    byteData[disp] = Math.round(Math.max(0, Math.min(1, (db - SDR_FLOOR) / (SDR_CEIL - SDR_FLOOR))) * 255);
+  }
+}
+
+// Simple RF peak marker for SDR mode (no modem threshold): loudest visible bin.
+function drawSdrPeak(g, W, H) {
+  const FLOOR = SDR_FLOOR, CEIL = SDR_CEIL;
+  const yOf = (db) => H * (1 - (Math.max(FLOOR, Math.min(CEIL, db)) - FLOOR) / (CEIL - FLOOR));
+  let pk = -1, pv = -1;
+  for (let b = vLoBin; b <= vHiBin && b < byteData.length; b++) if (byteData[b] > pv) { pv = byteData[b]; pk = b; }
+  if (pk < 0 || pv <= 0) return;
+  const px = xBin(pk, W), py = yOf(FLOOR + pv / 255 * (CEIL - FLOOR));
+  g.fillStyle = '#5affa0'; g.beginPath(); g.arc(px, py, 3.5, 0, 2 * Math.PI); g.fill();
+  g.textAlign = 'center'; g.font = '9px system-ui,sans-serif'; g.fillStyle = 'rgba(200,210,255,0.9)';
+  g.fillText((binToFreq(pk) / 1e6).toFixed(3) + ' MHz', px, Math.max(py - 7, 8));
 }
 
 /* ---- Constellation view (for DBPSK) --------------------------------------- */
@@ -1067,6 +1205,97 @@ async function forgetSdr() {
 
 // Prove the browser can actually grab the dongle (the step most likely to fail —
 // e.g. a kernel driver holding it on desktop Linux). Opens → claims → releases.
+function setSdrDemo(on) {
+  if (on && !ctx) { showUsbNote('Enable audio first (tap the start button), then Demo.', true); return; }
+  if (on && rtl) stopRtl();          // can't run synthetic and hardware at once
+  sdrSourceKind = 'synthetic';
+  sdrActive = on;
+  psdAvg = null; // reset the PSD average for the new source
+  $('sdrDemo').textContent = on ? '■ Stop IQ demo' : '▶ Demo (synthetic IQ)';
+  if (ctx) drawGuides();
+  if (on) showView('spectrum'); // jump to the spectrum so it's visible
+}
+
+/* ---- Real RTL-SDR streaming (rtlsdrjs) ------------------------------------ */
+async function connectRtl() {
+  if (!usbSupported()) { showUsbNote('WebUSB needed — Chrome/Edge/Opera on desktop or Android.', true); return; }
+  if (!ctx) { showUsbNote('Enable audio first, then connect the RTL-SDR.', true); return; }
+  if (rtl) { stopRtl(); return; }    // button toggles: stop if already streaming
+  try {
+    showUsbNote('Loading RTL-SDR driver…');
+    const mod = await import(RTLSDR_MODULE_URL);
+    const RtlSdr = mod.default || mod.RtlSdr || mod;
+    rtl = await RtlSdr.requestDevice();               // browser device picker
+    await rtl.open({ ppm: 0, gain: sdrGainDb });
+    sdrRate = await rtl.setSampleRate(sdrRate);        // device returns the actual value
+    sdrCenterHz = await rtl.setCenterFrequency(sdrCenterHz);
+    await rtl.resetBuffer();
+    sdrSourceKind = 'rtlsdr'; sdrActive = true; rtlReading = true; psdAvg = null;
+    syncTunerSliders();
+    $('sdrConnectRtl').textContent = '■ Stop RTL-SDR';
+    $('sdrDemo').textContent = '▶ Demo (synthetic IQ)';
+    showUsbNote('✓ Streaming from RTL-SDR.');
+    if (ctx) drawGuides();
+    showView('spectrum');
+    rtlReadLoop();
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') { showUsbNote(''); return; } // picker cancelled
+    showUsbNote('RTL-SDR: ' + e.message + ' — driver failed to load, or another app/driver holds the device.', true);
+    rtl = null; rtlReading = false; sdrActive = false; sdrSourceKind = 'synthetic';
+  }
+}
+
+async function rtlReadLoop() {
+  if (!latestIq) latestIq = new Float32Array(SDR_FFT * 2);
+  while (rtlReading && rtl) {
+    let buf;
+    try { buf = await rtl.readSamples(RTL_READ); }
+    catch (e) { showUsbNote('RTL read error: ' + e.message, true); break; }
+    const u8 = new Uint8Array(buf);
+    const off = Math.max(0, u8.length - SDR_FFT * 2); // newest FFT block from the chunk
+    for (let i = 0; i < SDR_FFT; i++) {
+      latestIq[2 * i] = (u8[off + 2 * i] - 127.5) / 127.5;         // 8-bit unsigned → ±1
+      latestIq[2 * i + 1] = (u8[off + 2 * i + 1] - 127.5) / 127.5;
+    }
+  }
+  rtlReading = false;
+}
+
+async function stopRtl() {
+  rtlReading = false;
+  sdrActive = false; sdrSourceKind = 'synthetic';
+  const d = rtl; rtl = null;
+  if (d && d.close) { try { await d.close(); } catch (_) {} }
+  $('sdrConnectRtl').textContent = '▶ Connect RTL-SDR';
+  showUsbNote('RTL-SDR stopped.');
+  if (ctx) drawGuides();
+}
+
+// Push current knob values to the hardware (debounced — dragging fires many events).
+let tunerHwTimer = 0;
+function applyTunerHw() {
+  if (sdrSourceKind !== 'rtlsdr' || !rtl) return;
+  clearTimeout(tunerHwTimer);
+  tunerHwTimer = setTimeout(async () => {
+    if (!rtl) return;
+    try {
+      sdrRate = await rtl.setSampleRate(sdrRate);
+      sdrCenterHz = await rtl.setCenterFrequency(sdrCenterHz);
+      if (rtl.setGain) await rtl.setGain(sdrGainDb); // not all builds expose live gain
+      await rtl.resetBuffer();
+    } catch (e) { showUsbNote('tune error: ' + e.message, true); }
+  }, 150);
+}
+
+// Reflect device-reported (clamped) rate/center back onto the sliders + labels.
+function syncTunerSliders() {
+  $('tunCenter').value = (sdrCenterHz / 1e6).toFixed(1);
+  $('tunRate').value = (sdrRate / 1e6).toFixed(2);
+  $('tunCenterLabel').textContent = (sdrCenterHz / 1e6).toFixed(1) + ' MHz';
+  $('tunRateLabel').textContent = (sdrRate / 1e6).toFixed(2) + ' MS/s';
+  $('tunGainLabel').textContent = sdrGainDb + ' dB';
+}
+
 async function testSdr() {
   if (!sdrDevice) { showUsbNote('Select a USB SDR first.', true); return; }
   const d = sdrDevice;
@@ -1185,6 +1414,20 @@ window.addEventListener('DOMContentLoaded', () => {
   $('sdrTest').addEventListener('click', testSdr);
   $('sdrForget').addEventListener('click', forgetSdr);
   $('deviceSel').addEventListener('change', selectFromDropdown);
+  $('sdrDemo').addEventListener('click', () => setSdrDemo(!sdrActive));
+  const applyTuner = () => {
+    sdrCenterHz = (+$('tunCenter').value) * 1e6;
+    sdrRate = (+$('tunRate').value) * 1e6;
+    sdrGainDb = +$('tunGain').value;
+    $('tunCenterLabel').textContent = (+$('tunCenter').value).toFixed(1) + ' MHz';
+    $('tunRateLabel').textContent = (+$('tunRate').value).toFixed(2) + ' MS/s';
+    $('tunGainLabel').textContent = sdrGainDb + ' dB';
+    if (sdrActive && ctx) drawGuides(); // refresh the waterfall overlay ticks
+    applyTunerHw();                     // push to real hardware if streaming (debounced)
+  };
+  ['tunCenter', 'tunRate', 'tunGain'].forEach((id) => $(id).addEventListener('input', applyTuner));
+  applyTuner();
+  $('sdrConnectRtl').addEventListener('click', connectRtl);
   if (usbSupported()) {
     navigator.usb.addEventListener('connect', () => populateDeviceSelect());
     navigator.usb.addEventListener('disconnect', (e) => {

@@ -294,6 +294,41 @@
           <button id="sdrRefresh" class="ghost">Refresh</button>
         </div>
       </div>
+
+      <!-- IQ receiver + tuner. Runs on synthetic IQ now (no dongle needed); a real
+           RTL-SDR swaps in behind the same controls later. -->
+      <div class="card">
+        <h2>Tuner (IQ receiver)</h2>
+        <p class="hint">No dongle yet? <b>Demo (synthetic IQ)</b> feeds a fake RF band
+           into the complex-FFT pipeline so the spectrum/waterfall run in SDR mode. The
+           knobs are the real ones an SDR uses: RF center, sample rate (= bandwidth),
+           and gain. Watch it on the <b>Spectrum</b> tab.</p>
+        <div class="row" style="margin-bottom:10px">
+          <button id="sdrConnectRtl" class="primary">▶ Connect RTL-SDR</button>
+          <button id="sdrDemo" class="ghost">▶ Demo (synthetic IQ)</button>
+        </div>
+        <p class="hint" style="margin:-4px 0 10px">Real dongle → <b>Connect RTL-SDR</b>
+           (loads the driver, ~1&nbsp;MB, needs internet the first time). No dongle →
+           <b>Demo</b>. Gain changes apply live if your driver build supports it.</p>
+        <div class="modrow">
+          <label for="tunCenter">Center</label>
+          <input id="tunCenter" type="range" min="24" max="1766" step="0.1" value="100" />
+          <span id="tunCenterLabel" style="min-width:74px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">100.0 MHz</span>
+        </div>
+        <div class="modrow">
+          <label for="tunRate">Rate</label>
+          <input id="tunRate" type="range" min="0.25" max="2.4" step="0.05" value="2.4" />
+          <span id="tunRateLabel" style="min-width:74px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">2.40 MS/s</span>
+        </div>
+        <div class="modrow">
+          <label for="tunGain">Gain</label>
+          <input id="tunGain" type="range" min="0" max="50" step="1" value="30" />
+          <span id="tunGainLabel" style="min-width:74px;text-align:right;color:var(--accent);
+                font-variant-numeric:tabular-nums">30 dB</span>
+        </div>
+      </div>
     </section>
   </main>
 
