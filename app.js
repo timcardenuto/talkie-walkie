@@ -18,8 +18,13 @@
  * ===========================================================================*/
 
 /* ---- Framing / channel constants ------------------------------------------ */
-const SYMBOL_MS = 120;   // how long each symbol sounds
-const GAP_MS    = 60;    // silence between symbols (the self-clocking trick)
+// IMPORTANT: the gap must be comfortably LONGER than the FFT analysis window
+// (fftSize/sampleRate ≈ 43 ms at 2048/48k). Otherwise a tone's energy lingers in
+// the window through the whole gap, the receiver never sees silence, and symbols
+// (including START) merge into one blob so nothing decodes. Gap 140 ms leaves
+// ~97 ms of clean silence per gap, with margin for room reverb.
+const SYMBOL_MS = 140;   // how long each symbol sounds
+const GAP_MS    = 140;   // silence between symbols (the self-clocking trick)
 const AMP       = 0.3;   // default transmit volume (0..1)
 
 const F_START = 1500;    // start-of-message marker tone
@@ -34,8 +39,8 @@ let SNR_DB      = 10;    // a burst must beat the in-band average by this to cou
                          // (adjustable live via the Sensitivity slider)
 const ABS_FLOOR = -80;   // ...and be at least this loud (dBFS-ish)
 
-const MIN_TONE_MS   = 45;   // ignore tone blips shorter than this
-const MIN_GAP_MS    = 30;   // this much silence ends the current symbol
+const MIN_TONE_MS   = 55;   // ignore tone blips shorter than this
+const MIN_GAP_MS    = 40;   // this much silence ends the current symbol
 const RX_TIMEOUT_MS = 2500; // give up on a partial message after this much silence
 
 /* ---- Low-level audio scheduling primitives -------------------------------- */
@@ -402,7 +407,9 @@ async function enable() {
 // turned on. startMic() later connects a source into this same analyser.
 function setupAudioGraph() {
   analyser = ctx.createAnalyser();
-  analyser.fftSize = 4096;
+  // ~43 ms window at 48 kHz (~23 Hz bins). Small enough that the inter-symbol
+  // gaps are actually visible to the detector — see the note by GAP_MS.
+  analyser.fftSize = 2048;
   analyser.smoothingTimeConstant = 0.0;
   analyser.minDecibels = -100;
   analyser.maxDecibels = -10;
@@ -897,9 +904,19 @@ function classifyBurst(frames, idx) {
   return mod.decodeData(frames, idx, rxSamples); // modulation-specific
 }
 
+let burstCount = 0;
 function commitBurst(frames) {
   const now = performance.now();
   const sym = classifyBurst(frames, dataIdx);
+
+  // Diagnostic: how many bursts we've segmented, what the last one was, and how
+  // many analysis frames it spanned. A healthy symbol is ~8-12 frames; dozens
+  // means gaps aren't being seen and symbols are merging.
+  burstCount++;
+  const dbg = $('rxDebug');
+  if (dbg) dbg.textContent = 'bursts: ' + burstCount + ' · last: ' +
+    (typeof sym === 'number' ? 'sym ' + sym : sym || 'noise') + ' · frames: ' + frames.length;
+
   if (sym === 'START') {
     // A START alone does NOT start a reception. A steady tone at 1500 Hz (coil whine,
     // hum) classifies as START over and over — so treat it as a *candidate* and reset
